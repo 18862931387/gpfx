@@ -1,0 +1,48 @@
+# 项目：A股数据分析和策略回测系统
+# 用途：排除不需要纳入版本控制的文件
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 环境/虚拟环境
+.env
+.venv
+venv/
+env/
+
+# 数据库导出（按需上传，不自动包含）
+db_export_*.sql
+
+# 操作系统
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 日志/临时输出
+*.log
+*.out
+*.err
+_output/
+temp/
+
+# 临时探索脚本
+_[a-z]*.py
+_[a-z]*.txt
+
+# 系统目录
+.workbuddy/
+
+# 二进制/编译文件
+*.dll
+*.exe
+
+# 包装脚本
+*.ps1
+*.cmd
