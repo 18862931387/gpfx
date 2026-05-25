@@ -6,7 +6,7 @@ sys.stdout = io.open(out_path, 'w', encoding='utf-8')
 
 conn = pymysql.connect(
     host='localhost', port=3306,
-    user='root', password='123456',
+    user='root', password='root123',
     database='data_analysis', charset='utf8mb4'
 )
 cursor = conn.cursor()

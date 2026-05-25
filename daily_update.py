@@ -10,7 +10,7 @@ urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
 
 DB_HOST = 'localhost'
 DB_USER = 'root'
-DB_PASS = '123456'
+DB_PASS = 'root123'
 DB_NAME = 'data_analysis'
 
 date_str = __import__('datetime').date.today().isoformat()

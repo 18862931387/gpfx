@@ -2,8 +2,8 @@ import pymysql, requests, json, sys
 sys.stdout.reconfigure(encoding='utf-8')
 
 conn = pymysql.connect(
-    host='192.168.10.100', port=3306,
-    user='root', password='root',
+    host='localhost', port=3306,
+    user='root', password='root123',
     database='data_analysis', charset='utf8mb4'
 )
 cursor = conn.cursor()

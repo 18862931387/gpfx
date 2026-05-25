@@ -53,7 +53,7 @@ idx_pct = (idx_cur - idx_pre) / idx_pre * 100 if idx_pre else 0
 def get_sent_calibration():
     try:
         import pymysql
-        conn = pymysql.connect(host='localhost',port=3306,user='root',password='123456',database='data_analysis',charset='utf8mb4')
+        conn = pymysql.connect(host='localhost',port=3306,user='root',password='root123',database='data_analysis',charset='utf8mb4')
         cur = conn.cursor()
         cur.execute("SELECT index_change,sentiment_value FROM market_sentiment WHERE index_change IS NOT NULL AND index_change!='None' AND index_change!='' ORDER BY trade_date DESC LIMIT 20")
         rows = cur.fetchall()
@@ -89,7 +89,7 @@ ZONE = zone(SENT)
 tv, lu, ld = 0, 0, 0
 try:
     import pymysql
-    conn = pymysql.connect(host='localhost',port=3306,user='root',password='123456',database='data_analysis',charset='utf8mb4')
+    conn = pymysql.connect(host='localhost',port=3306,user='root',password='root123',database='data_analysis',charset='utf8mb4')
     cur = conn.cursor()
     cur.execute("SELECT turnover, limit_up, limit_down FROM market_daily_stats ORDER BY trade_date DESC LIMIT 1")
     r = cur.fetchone()
