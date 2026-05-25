@@ -1,7 +1,7 @@
 # A股数据分析与尾盘决策系统
 
 > 项目路径：`D:\code\xlx\`
-> 最后更新：2026-05-25
+> 最后更新：2026-05-26
 > MySQL 5.6 | 数据库：`data_analysis` | root/root123
 > Git: `github.com/18862931387/gpfx` (SSH)
 
@@ -41,10 +41,10 @@ _afternoon_check.py ← 14:30后运行
 | 表 | 记录数 | 说明 |
 |:---|:------:|:-----|
 | `fund_history` | 113条 | 3只ETF净值（516330/563300/588090） |
-| `market_sentiment` | 49条 | 2026-01-05 ~ 2026-05-22 |
-| `market_daily_stats` | 58条 | 2026-02-11 ~ 2026-05-22 |
-| `position` | 2条 | 5/21建仓→5/25清仓 563300 |
-| `backtest_results` | 30条 | 5策略×2基金×3时段 |
+| `market_sentiment` | 50条 | 2026-01-05 ~ 2026-05-25 |
+| `market_daily_stats` | 59条 | 2026-02-11 ~ 2026-05-25 |
+| `position` | 3条 | 5/21建仓→5/25清仓 563300 (含5/25更新) |
+| `backtest_results` | 36条 | 6策略×2基金×3时段 |
 
 ### 2.2 核心表
 
@@ -69,7 +69,7 @@ _afternoon_check.py ← 14:30后运行
 
 | 文件 | 说明 |
 |:----|:------|
-| `_afternoon_check.py` | **尾盘决策 v5.3** — 实时行情+情绪+资金流向+交易信号 |
+| `_afternoon_check.py` | **尾盘决策 v5.4** — 实时行情+情绪+资金流向+交易信号 |
 | `daily_update.py` | 一键更新：指数行情+基金净值 |
 | `sentiment_calibrate.py` | 情绪计算核心算法 |
 | `verify_db.py` | 数据库数据验证 |
@@ -77,7 +77,7 @@ _afternoon_check.py ← 14:30后运行
 
 ---
 
-## 四、交易策略 v5.3
+## 四、交易策略 v5.4
 
 ### 买入条件（全部满足）
 
@@ -92,7 +92,7 @@ _afternoon_check.py ← 14:30后运行
 
 | 规则 | 条件 |
 |:----|:------|
-| **情绪过热** | 情绪 ≥ 1.0 → 清仓 |
+| **情绪过热** | 情绪 ≥ **1.5** → 清仓（v5.4从1.0上调） |
 | **止盈** | 浮盈 ≥ 2% → 卖一半 |
 | **止损** | 日跌 ≥ 3% → 清仓 |
 
@@ -132,7 +132,7 @@ python daily_update.py
 
 ```sql
 INSERT INTO position (fund_code, fund_name, trade_date, trade_type, shares, price, amount, shares_after, cash_after, note)
-VALUES ('563300', '中证2000ETF华泰柏瑞', '2026-05-25', 'sell', 1000, 1.636, 1636, 0, 20039, '清仓: 情绪过热+1.8');
+VALUES ('563300', '中证2000ETF华泰柏瑞', '2026-05-25', 'sell', 1000, 1.636, 1636, 0, 20039, '清仓: 情绪过热+1.8(v5.4阈值1.5)');
 ```
 
 ---
