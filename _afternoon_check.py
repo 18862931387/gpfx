@@ -11,24 +11,54 @@ HDR = {'User-Agent': 'Mozilla/5.0'}
 EM_HDR = {**HDR, 'Referer': 'https://data.eastmoney.com/'}
 UT = 'fa5fd1943c7b386f172d6893dbbd1d0c'
 FUND = '563300'; FUND_NAME = '中证2000ETF'
+# 如果有持仓则自动使用持仓的基金
+def get_held_fund():
+    try:
+        import pymysql
+        conn = pymysql.connect(host='localhost',port=3306,user='root',password='root123',database='data_analysis',charset='utf8mb4')
+        cur = conn.cursor()
+        cur.execute("SELECT fund_code,fund_name FROM position GROUP BY fund_code HAVING SUM(CASE WHEN trade_type='buy' THEN shares ELSE -shares END) > 0")
+        r = cur.fetchone()
+        conn.close()
+        if r: return r[0], r[1]
+    except: pass
+    return FUND, FUND_NAME
+FUND, FUND_NAME = get_held_fund()
 CAPITAL = 20000.0; MAX_PER_TRADE = 10000.0
 
 TODAY = datetime.date.today().isoformat()
-DIR = os.path.dirname(os.path.abspath(__file__))
-POS_FILE = os.path.join(DIR, '_position.txt')
 
-def read_pos():
+def get_pos_from_db():
     try:
-        with open(POS_FILE) as f:
-            parts = f.read().strip().split(',')
-            return float(parts[0]), float(parts[1]), float(parts[2])
-    except: return 0, 0, CAPITAL
+        import pymysql
+        conn = pymysql.connect(host='localhost',port=3306,user='root',password='root123',database='data_analysis',charset='utf8mb4')
+        cur = conn.cursor()
+        cur.execute("SELECT fund_code,fund_name,SUM(CASE WHEN trade_type='buy' THEN shares ELSE -shares END) shares_hold FROM position GROUP BY fund_code")
+        r = cur.fetchone()
+        if r and r[2] > 0:
+            cur.execute("SELECT price FROM position WHERE fund_code=%s AND trade_type='buy' ORDER BY id DESC LIMIT 1", (r[0],))
+            entry = cur.fetchone()[0]
+            cur.execute("SELECT cash_after FROM position ORDER BY id DESC LIMIT 1")
+            cash = float(cur.fetchone()[0])
+            conn.close()
+            return float(r[2]), float(entry), cash
+        conn.close()
+    except: pass
+    return 0, 0, CAPITAL
 
-def save_pos(shares, entry, cash):
-    with open(POS_FILE, 'w') as f:
-        f.write(f'{shares},{entry},{cash}')
+def get_cost_from_db(fund_code):
+    try:
+        import pymysql
+        conn = pymysql.connect(host='localhost',port=3306,user='root',password='root123',database='data_analysis',charset='utf8mb4')
+        cur = conn.cursor()
+        cur.execute("SELECT price FROM position WHERE fund_code=%s AND trade_type='buy' ORDER BY id DESC LIMIT 1", (fund_code,))
+        r = cur.fetchone()
+        conn.close()
+        if r: return float(r[0])
+    except: pass
+    return 0
 
-shares, entry, cash = read_pos()
+shares, entry, cash = get_pos_from_db()
 if cash < 100: cash = CAPITAL
 
 # 1. 实时行情 (腾讯API)
