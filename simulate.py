@@ -24,17 +24,27 @@ except Exception as e:
     log.error(f'DB连接失败: {e}')
     db_sent = {}
 
-# ── K线 ──
+# ── K线: 优先读本地缓存 etf_kline ──
 klines = []
 try:
-    r = requests.get(TENCENT_KLINE,
-        params={'param': f'sh{PRIMARY_FUND},day,,,120,qfq'}, headers=HDR, timeout=10)
-    data = r.json().get('data', {}).get(f'sh{PRIMARY_FUND}', {})
-    klines = data.get('qfqday', data.get('day', []))
-    if not klines:
-        log.error('K线API返回空数据')
+    cur.execute("SELECT trade_date,open,high,low,close,volume FROM etf_kline WHERE fund_code=%s AND is_adj=1 ORDER BY trade_date", (PRIMARY_FUND,))
+    rows = cur.fetchall()
+    if rows and len(rows) >= 30:
+        klines = [[r[0].strftime('%Y-%m-%d'), str(r[1]), str(r[4]), str(r[3]), str(r[4]), str(r[5] or 0) if r[5] else None] for r in rows]
+        log.info(f'K线从 etf_kline 缓存读取 {len(klines)} 条')
 except Exception as e:
-    log.error(f'K线API失败: {e}')
+    log.warning(f'etf_kline 读取失败: {e}')
+
+# 缓存不足时走API
+if len(klines) < 30:
+    try:
+        r = requests.get(TENCENT_KLINE,
+            params={'param': f'sh{PRIMARY_FUND},day,,,120,qfq'}, headers=HDR, timeout=10)
+        data = r.json().get('data', {}).get(f'sh{PRIMARY_FUND}', {})
+        klines = data.get('qfqday', data.get('day', []))
+        log.info(f'K线从 API 获取 {len(klines)} 条')
+    except Exception as e:
+        log.error(f'K线API失败: {e}')
 
 pv = {k[0]: float(k[2]) for k in klines if len(k) >= 5}
 log.info(f'K线数据 {len(pv)} 条')

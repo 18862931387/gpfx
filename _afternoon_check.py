@@ -9,6 +9,7 @@ urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
 sys.path.insert(0, os.path.dirname(__file__))
 from strategy_config import get_latest
 from config import DB, CAPITAL, SYSTEM_BASE_CASH, PRIMARY_FUND, PRIMARY_FUND_NAME
+from news_sentiment import read_sentiment_from_db
 
 VER = get_latest()
 P = VER["params"]
@@ -91,11 +92,15 @@ cur_p = float(etf[3]) if len(etf) > 3 else 0
 pre_p = float(etf[4]) if len(etf) > 4 else 0
 pct = (cur_p - pre_p) / pre_p * 100 if pre_p else 0
 
+if cur_p <= 0:
+    print('ERROR: 无法获取实时行情(cur_p=0)，请检查腾讯API是否可达')
+    sys.exit(1)
+
 idx_cur = float(idx[3]) if len(idx) > 3 else 0
 idx_pre = float(idx[4]) if len(idx) > 4 else 0
 idx_pct = (idx_cur - idx_pre) / idx_pre * 100 if idx_pre else 0
 
-# 2. 最近市场量价 (从DB取最新, 仅当日期为今日时才用于当日修正)
+# 2. 最近市场量价 — 三级策略: DB今日 > push2实时 > DB昨日兜底
 tv, lu, ld, db_today = 0, 0, 0, False
 margin_chg = 0.0  # 融资余额5日变化率
 try:
@@ -106,7 +111,33 @@ try:
     r = cur.fetchone()
     if r:
         db_today = str(r[0]) == TODAY
-        if db_today: tv, lu, ld = float(r[1] or 0), int(r[2] or 0), int(r[3] or 0)
+        if db_today:
+            tv, lu, ld = float(r[1] or 0), int(r[2] or 0), int(r[3] or 0)
+        else:
+            # 今日无DB → 实时抓push2
+            print(f'  🔄 DB无今日数据，实时抓取push2...', end='')
+            try:
+                clist_h = {**HDR, 'Referer': 'https://quote.eastmoney.com/'}
+                p = {'pn':1,'pz':5000,'po':1,'np':1,'ut':UT,'fltt':2,'invt':2,'fid':'f3',
+                     'fs':'m:0+t:6,m:0+t:13,m:1+t:2,m:1+t:23','fields':'f3'}
+                r2 = requests.get('https://push2.eastmoney.com/api/qt/clist/get', params=p, headers=clist_h, timeout=15)
+                items = r2.json().get('data',{}).get('diff',[])
+                lu = sum(1 for i in items if i.get('f3') and float(i['f3']) >= 9.9)
+                ld = sum(1 for i in items if i.get('f3') and float(i['f3']) <= -9.9)
+                # 成交额: 上证+深证
+                tv = 0.0
+                for sid in ('1.000001','0.399001'):
+                    try:
+                        r3 = requests.get('https://push2.eastmoney.com/api/qt/stock/get',
+                            params={'secid':sid,'fields':'f48'}, headers=clist_h, timeout=10)
+                        tv += (r3.json().get('data',{}).get('f48') or 0)
+                    except: pass
+                tv = round(tv/1e8, 2) if tv else None
+                print(f' 涨停{lu} 跌停{ld} 成交{tv}亿')
+            except Exception as e:
+                # push2失败 → 用昨日DB兜底
+                tv, lu, ld = float(r[1] or 0), int(r[2] or 0), int(r[3] or 0)
+                print(f' push2异常({e}), 用DB最近交易日({r[0]})兜底')
     # 融资余额: 取最近两条，计算5日变化率
     cur.execute("SELECT trade_date, margin_balance FROM sentiment_raw_factors WHERE margin_balance IS NOT NULL ORDER BY trade_date DESC LIMIT 10")
     margins = [(str(r[0]), float(r[1])) for r in cur.fetchall()]
@@ -154,10 +185,26 @@ def get_rt_market(code):
 sz_pct = get_rt_market('sz399001')
 cy_pct = get_rt_market('sz399006')
 zz_pct = get_rt_market('sh000852')  # 中证2000
+
+# 复合指数兜底: 实时API失败时从 index_daily 读取最近一条
+if sz_pct is None or cy_pct is None or zz_pct is None:
+    try:
+        conn2 = pymysql.connect(**DB)
+        cur2 = conn2.cursor()
+        cur2.execute("SELECT sh_pct,sz_pct,cy_pct,zz2000_pct FROM index_daily ORDER BY trade_date DESC LIMIT 1")
+        backup = cur2.fetchone()
+        conn2.close()
+        if backup:
+            if idx_pct == 0: idx_pct = float(backup[0] or 0)
+            if sz_pct is None: sz_pct = float(backup[1] or 0)
+            if cy_pct is None: cy_pct = float(backup[2] or 0)
+            if zz_pct is None: zz_pct = float(backup[3] or 0)
+    except: pass
+
 composite = idx_pct * 0.3 + (sz_pct or 0) * 0.2 + (cy_pct or 0) * 0.1 + (zz_pct or 0) * 0.4
 
 # 5. 情绪估算 (复合指数回归 + 多因子修正)
-def calc_sentiment(composite, limit_up, limit_down, turnover, mf_net, margin_chg, northbound_net, data_is_today):
+def calc_sentiment(composite, limit_up, limit_down, turnover, mf_net, margin_chg, northbound_net, news_score, data_is_today):
     # 基础分: 复合指数回归
     # sentiment = 0.3461 + 0.8168 * composite  # 48条旧标定 (回测更优, 手动切换)
     # sentiment = -0.1309 + 1.0622 * composite  # auto-calibrated on 2026-06-01
@@ -206,6 +253,10 @@ def calc_sentiment(composite, limit_up, limit_down, turnover, mf_net, margin_chg
         elif northbound_net < -20:
             val -= 0.2
 
+    # 新闻情绪修正 (keyword scored, -2~+2 → ±0.6)
+    if news_score:
+        val += news_score * 0.3
+
     val = max(-2.5, min(2.5, val))
     if val >= 2.0:   zone = '沸点'
     elif val >= 1.0: zone = '过热'
@@ -216,7 +267,10 @@ def calc_sentiment(composite, limit_up, limit_down, turnover, mf_net, margin_chg
     else:            zone = '冰点'
     return round(val, 2), zone
 
-SENT, ZONE = calc_sentiment(composite, lu, ld, tv, main_force_net, margin_chg, northbound_net, db_today)
+# 新闻情绪分 (从 market_news 读取)
+news_score = read_sentiment_from_db()
+
+SENT, ZONE = calc_sentiment(composite, lu, ld, tv, main_force_net, margin_chg, northbound_net, news_score, db_today)
 
 # ===== a-stock-data 集成模块 =====
 
@@ -278,17 +332,29 @@ fund_flow = eastmoney_fund_flow_minute(FUND)
 hgt_val, sgt_val = hsgt_realtime()
 ind_top, ind_bot = industry_ranking(5)
 
-# 4b. 20日均线 (从腾讯K线取近120日数据)
+# 4b. 20日均线 (优先读 etf_kline 缓存, 缓存不足走API)
 ma20_val = None
 try:
-    r = requests.get('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get',
-        params={'param':'sh563300,day,,,120,qfq'}, headers=HDR, timeout=10)
-    data = r.json()['data']['sh563300']
-    klines = data.get('qfqday', data.get('day', []))
-    closes = [float(k[2]) for k in klines if len(k) >= 5]
-    if len(closes) >= 20:
-        ma20_val = sum(closes[-20:]) / 20
+    import pymysql
+    conn_tmp = pymysql.connect(**DB)
+    cur_tmp = conn_tmp.cursor()
+    cur_tmp.execute("SELECT close FROM etf_kline WHERE fund_code='563300' AND is_adj=1 ORDER BY trade_date DESC LIMIT 20")
+    rows = cur_tmp.fetchall()
+    conn_tmp.close()
+    if len(rows) >= 20:
+        ma20_val = sum(float(r[0]) for r in rows) / 20
 except: pass
+
+if ma20_val is None:
+    try:
+        r = requests.get('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get',
+            params={'param':'sh563300,day,,,120,qfq'}, headers=HDR, timeout=10)
+        data = r.json()['data']['sh563300']
+        klines = data.get('qfqday', data.get('day', []))
+        closes = [float(k[2]) for k in klines if len(k) >= 5]
+        if len(closes) >= 20:
+            ma20_val = sum(closes[-20:]) / 20
+    except: pass
 above_ma20 = ma20_val and cur_p > ma20_val
 
 # 5. 判断信号
@@ -333,6 +399,7 @@ if ma20_val: print(f'  20日均线: {ma20_val:.4f}  现价{"↑" if above_ma20 e
 print(f'  成交额: {tv:.0f}亿  涨停{lu}  跌停{ld}')
 if margin_chg: print(f'  融资余额5日变化: {margin_chg:+.2f}%')
 if northbound_net: print(f'  北向资金: {northbound_net:+.1f}亿')
+if news_score: print(f'  新闻情绪: {news_score:+.2f} (-2恐慌~+2亢奋)')
 if fund_flow:
     last_f = fund_flow[-1]
     total_main = sum(r["main_net"] for r in fund_flow)

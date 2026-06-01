@@ -29,12 +29,16 @@ sentiment_pipeline.py ─┬─ 每日采集多因子原始数据
 MySQL 数据库 (data_analysis)
     │
 ├── market_daily_stats       大盘涨跌停+成交额 (57 rows)
-├── market_capital_flow      大盘资金流向 (永久丢失)
+├── market_capital_flow      大盘资金流向 (60 rows, backfilled)
 ├── market_sentiment         市场情绪 (120 rows, -2.5~2.5)
+├── index_daily              四大指数日涨跌幅备份
+├── market_news              每日新闻标题+情绪打分 (NEW)
 ├── sentiment_raw_factors    多因子原始数据 (120 rows)
 ├── fund_history             基金净值 (216 rows)
+├── etf_kline                ETF日K线缓存 (NEW — 回测加速)
 ├── position                 持仓记录 (real+system)
 ├── backtest_results         策略回测结果 (4 rows)
+├── strategy_signals         策略信号日志 (NEW)
     │
 strategy_config.py  ── VERSIONS[-1] = v5.6 参数中心
     │
@@ -59,6 +63,29 @@ config.py  ─┬─ DB = {host, port, user, password, database}
 
 ### 2.1 核心表
 
+**fund_history — 基金净值**
+
+| 字段 | 类型 | 说明 |
+|:----|:----|:-----|
+| fund_code | VARCHAR(10) | 基金代码 |
+| net_date | DATE | 净值日期 |
+| unit_nav | DECIMAL(10,4) | 单位净值 |
+| accum_nav | DECIMAL(10,4) | 累计净值 |
+| daily_growth | DECIMAL(6,2) | 日增长率% |
+
+**etf_kline — ETF日K线缓存 (NEW)**
+
+| 字段 | 类型 | 说明 |
+|:----|:----|:-----|
+| fund_code | VARCHAR(10) | 基金代码 |
+| trade_date | DATE | 交易日 |
+| open | DECIMAL(10,4) | 开盘价 |
+| high | DECIMAL(10,4) | 最高价 |
+| low | DECIMAL(10,4) | 最低价 |
+| close | DECIMAL(10,4) | 收盘价 |
+| volume | DECIMAL(20,2) | 成交量 |
+| is_adj | TINYINT(1) | 1=前复权 |
+
 **position — 持仓记录**
 
 | 字段 | 类型 | 说明 |
@@ -79,10 +106,11 @@ config.py  ─┬─ DB = {host, port, user, password, database}
 | 字段 | 类型 | 说明 |
 |:----|:----|:-----|
 | trade_date | DATE | 交易日 |
-| sentiment_value | DECIMAL(4,2) | -2.5~2.5 |
+| sentiment_value | DECIMAL(5,2) | -2.5~2.5 |
 | sentiment_zone | VARCHAR(10) | 冷热区间 |
-| composite_idx | DECIMAL(6,4) | 原始复合指数 |
-| calibrated | TINYINT(1) | 是否校准 |
+| composite_idx | DECIMAL(6,4) | 原始4指数加权值 |
+| calibrated | TINYINT(1) | 0=calc_sentiment / 1=回归标定 |
+| market_desc | TEXT | 市场描述 |
 
 **sentiment_raw_factors — 多因子原始数据**
 
@@ -100,6 +128,41 @@ config.py  ─┬─ DB = {host, port, user, password, database}
 | margin_balance | DECIMAL(20,2) | 融资融券余额 |
 | northbound_net | DECIMAL(20,2) | 北向资金净流入 |
 
+**strategy_signals — 策略信号日志 (NEW)**
+
+| 字段 | 类型 | 说明 |
+|:----|:----|:-----|
+| trade_date | DATE | 交易日 |
+| signal_type | VARCHAR(10) | buyA/buyB/sell_all/stop_loss |
+| sentiment_value | DECIMAL(5,2) | 触发时情绪值 |
+| nav | DECIMAL(10,4) | 触发时净值 |
+| reason | VARCHAR(200) | 触发原因 |
+| executed | TINYINT(1) | 0=仅记录 / 1=已执行 |
+
+**index_daily — 指数日涨跌幅备份 (NEW)**
+
+| 字段 | 类型 | 说明 |
+|:----|:----|:-----|
+| trade_date | DATE | 交易日 |
+| sh_pct | DECIMAL(6,2) | 上证涨跌幅% |
+| sz_pct | DECIMAL(6,2) | 深证涨跌幅% |
+| cy_pct | DECIMAL(6,2) | 创业板涨跌幅% |
+| zz2000_pct | DECIMAL(6,2) | 中证2000涨跌幅% |
+
+> 由 daily_update.py 每日写入，_afternoon_check.py 实时API失败时作为兜底
+
+**market_news — 每日新闻情绪 (NEW)**
+
+| 字段 | 类型 | 说明 |
+|:----|:----|:-----|
+| trade_date | DATE | 交易日 |
+| title | VARCHAR(500) | 新闻标题 |
+| sentiment_score | DECIMAL(5,2) | 单条情绪分 -2~+2 |
+| pos_words | TEXT | 命中的利好关键词 |
+| neg_words | TEXT | 命中的利空关键词 |
+
+> 新浪财经滚动新闻 → 关键词匹配打分 → 综合加权 → 融入 sentiment 修正
+
 ---
 
 ## 三、核心文件
@@ -108,10 +171,15 @@ config.py  ─┬─ DB = {host, port, user, password, database}
 |:----|:------|
 | `config.py` | **配置中心** — DB/API/常量，所有脚本 import |
 | `strategy_config.py` | **版本管理中心** — 所有策略变体参数，`VERSIONS[-1]`=v5.6 |
+| `create_signals_table.sql` | strategy_signals 建表 DDL |
+| `create_kline_table.sql` | etf_kline 建表 DDL |
+| `create_position.sql` | position 建表 DDL |
+| `create_results_table.sql` | backtest_results 建表 DDL |
 | `_afternoon_check.py` | **尾盘决策 v5.6** — 复合情绪+双买入+清仓/止损+多因子实时修正 |
 | `sentiment_pipeline.py` | **情绪流水线** — 每日采集多因子+akshare融资融券/北向+重标定 |
+| `news_sentiment.py` | **新闻情绪因子** — 新浪财经头条抓取+关键词打分+综合评分 |
 | `sentiment_calibrate.py` | 旧版情绪校准（单指数+涨跌停+成交额+资金流向） |
-| `daily_update.py` | **一键更新** — 指数行情+基金净值+资金流向+自动备份 |
+| `daily_update.py` | **一键更新** — 指数行情+基金净值+ETF K线缓存+资金流向+自动备份 |
 | `backup_db.py` | **自动备份** — 7表导出SQL → git add/commit/push，保留7天 |
 | `simulate.py` | 策略回测引擎，从 `strategy_config.py` 读取参数 |
 | `verify_db.py` | 数据库数据验证查询 |
@@ -153,6 +221,8 @@ config.py  ─┬─ DB = {host, port, user, password, database}
 | margin_chg（融资变化率） | +0.72% → | +0.1 |
 | 北向净流入 | > +80亿 → | +0.4 |
 | 北向净流入 | < -60亿 → | -0.4 |
+| **新闻情绪 (NEW)** | +0.5~+2.0 → | **+0.15~+0.6** |
+| **新闻情绪 (NEW)** | -2.0~-0.5 → | **-0.6~-0.15** |
 | 涨停/跌停比 > 3 || +0.3 |
 | 涨停/跌停比 < 0.3 || -0.3 |
 | 成交额 > 25000亿 || ±0.2 |
