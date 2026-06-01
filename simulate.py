@@ -1,192 +1,160 @@
-# -*- coding: utf-8 -*-
-"""
-稳健策略 v3.0 模拟回测
-基金：563300（中证2000ETF华泰柏瑞）
-本金：20,000 元
-仓位上限：50%（最多持仓 10,000 元）
-"""
+import sys, pymysql, requests, socket, datetime
+sys.stdout.reconfigure(encoding='utf-8')
+import requests.packages.urllib3.util.connection as urllib3_cn
+urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
+sys.path.insert(0, __import__('os').path.dirname(__file__))
+from config import DB, CAPITAL, TENCENT_KLINE, HDR, PRIMARY_FUND
+from strategy_config import get_latest, VERSIONS
+from logger import get_logger
 
-import sys
-import io
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+log = get_logger('simulate')
 
-raw_data = [
-    ("2026-03-02", None,   1.5415),
-    ("2026-03-03", -1.90, 1.4820),
-    ("2026-03-04", -0.70, 1.4776),
-    ("2026-03-05",  1.20, 1.5026),
-    ("2026-03-06",  0.70, 1.5228),
-    ("2026-03-09", -0.50, 1.5098),
-    ("2026-03-10",  1.90, 1.5459),
-    ("2026-03-11",  0.90, 1.5444),
-    ("2026-03-12", -0.40, 1.5272),
-    ("2026-03-13", -0.50, 1.5106),
-    ("2026-03-16",  0.40, 1.5176),
-    ("2026-03-17", -1.30, 1.4775),
-    ("2026-03-18",  1.10, 1.5024),
-    ("2026-03-19", -1.30, 1.4631),
-    ("2026-03-20", -0.10, 1.4307),
-    ("2026-03-23", -2.10, 1.3515),
-    ("2026-03-24",  1.50, 1.4037),
-    ("2026-03-25",  1.80, 1.4349),
-    ("2026-03-26", -1.10, 1.4143),
-    ("2026-03-27",  0.90, 1.4348),
-    ("2026-03-30",  0.00, 1.4389),
-    ("2026-03-31", -1.30, 1.4120),
-    ("2026-04-01",  1.80, 1.4427),
-    ("2026-04-02", -1.20, 1.4190),
-    ("2026-04-03", -0.80, 1.3920),
-    ("2026-04-07",  0.40, 1.4118),
-    ("2026-04-08",  2.50, 1.4717),
-    ("2026-04-09", -0.40, 1.4635),
-    ("2026-04-10",  2.10, 1.4746),
-    ("2026-04-13",  0.60, 1.4795),
-    ("2026-04-14",  1.50, 1.4975),
-    ("2026-04-15", -0.60, 1.4899),
-    ("2026-04-16",  1.90, 1.5205),
-    ("2026-04-17",  0.60, 1.5336),
-    ("2026-04-20",  0.50, 1.5448),
-    ("2026-04-21",  0.20, 1.5418),
-    ("2026-04-22",  1.20, 1.5567),
-    ("2026-04-23", -0.60, 1.5374),
-    ("2026-04-24", -0.70, 1.5287),
-    ("2026-04-27",  0.20, 1.5428),
-    ("2026-04-28", -0.80, 1.5247),
-    ("2026-04-29",  1.80, 1.5478),
-    ("2026-04-30",  0.20, 1.5592),
-]
+VER = get_latest()
+P = VER["params"]
+VER_IDX = VERSIONS.index(VER) + 1
 
-CAPITAL = 20000.0
-MAX_POS = 0.50
-MAX_INVEST = CAPITAL * MAX_POS
+# ── DB: 读情绪历史 ──
+try:
+    conn = pymysql.connect(**DB)
+    cur = conn.cursor()
+    cur.execute("SELECT trade_date, sentiment_value FROM market_sentiment WHERE trade_date >= '2026-03-03' AND sentiment_value IS NOT NULL ORDER BY trade_date")
+    db_sent = {str(r[0]): float(r[1]) for r in cur.fetchall()}
+    log.info(f'读取情绪数据 {len(db_sent)} 条')
+except Exception as e:
+    log.error(f'DB连接失败: {e}')
+    db_sent = {}
 
+# ── K线 ──
+klines = []
+try:
+    r = requests.get(TENCENT_KLINE,
+        params={'param': f'sh{PRIMARY_FUND},day,,,120,qfq'}, headers=HDR, timeout=10)
+    data = r.json().get('data', {}).get(f'sh{PRIMARY_FUND}', {})
+    klines = data.get('qfqday', data.get('day', []))
+    if not klines:
+        log.error('K线API返回空数据')
+except Exception as e:
+    log.error(f'K线API失败: {e}')
 
-def run_simulation(data_list, start_cash, label):
-    """运行模拟，返回期末总资产和最大回撤"""
-    print(f"\n{'='*65}")
-    print(f"  {label}")
-    print(f"{'='*65}")
+pv = {k[0]: float(k[2]) for k in klines if len(k) >= 5}
+log.info(f'K线数据 {len(pv)} 条')
 
-    cash = start_cash
-    shares = 0.0
-    invested = 0.0
-    prev_nav = None
-    total_trades = 0
-    max_drawdown = 0.0
-    peak_value = start_cash
-    loss_sell_today = False  # 当日亏损清仓后不再买入
+MAX_INVEST = P["max_invest"]
 
-    print(f"{'日期':<12} {'情绪':>5} {'净值':>8} {'涨跌%':>7} {'操作':<26} {'持仓市值':>10} {'现金':>10} {'总资产':>10}")
-    print("-" * 92)
+def ma20(dates, idx):
+    if idx < 20: return None
+    seg = dates[idx-20:idx]
+    vals = [pv[d] for d in seg if d in pv]
+    return sum(vals)/len(vals) if len(vals) >= 15 else None
 
-    for date, sentiment, nav in data_list:
-        loss_sell_today = False  # 每个交易日开始时重置
+results = []
 
-        daily_change = 0.0
-        if prev_nav is not None and prev_nav > 0:
-            daily_change = (nav - prev_nav) / prev_nav * 100
-        prev_nav = nav
+def run(label, start_date, end_date):
+    dates = sorted(d for d in db_sent if start_date <= d <= end_date and d in pv)
+    if len(dates) < 5:
+        log.warning(f'{label}: 数据不足 ({len(dates)}天)，跳过')
+        return 0, 0, 0
 
-        if sentiment is None:
-            continue
+    cash = CAPITAL; shares = 0.0; invested = 0.0; prev = None
+    peak = CAPITAL; mdd = 0.0; trades = 0; sold_half = False
+    trail_hi = 0.0
 
-        pos_value = shares * nav
-        total_value = cash + pos_value
+    print(f'\n{"="*75}')
+    print(f'  {VER["ver"]} {label} | {dates[0]}~{dates[-1]} ({len(dates)}天)')
+    b = P["buyB"]
+    b_desc = f'买B:情绪{b["sv_min"]}~{b["sv_max"]}&站上20日线{"半" if b["position"]<1 else ""}全仓' if b else ''
+    print(f'  买A:情绪≤{P["buyA_sv_max"]}&跌≥{P["buyA_dc_min"]}% {b_desc}')
+    print(f'  卖:≥{P["sell_all_sv"]}清仓', end='')
+    if P["sell_half_sv"]: print(f'  {P["sell_half_sv"]}~{P["sell_all_sv"]}卖一半', end='')
+    print(f' | 止损{P["stop_loss_pct"]}%', end='')
+    if P["trailing_stop_pct"]: print(f' 回撤{P["trailing_stop_pct"]}%', end='')
+    if P["take_profit_pct"]: print(f' 止盈+{P["take_profit_pct"]}%', end='')
+    print()
+    print(f'{"="*75}')
+    print(f'{"日期":12} {"情绪":>5} {"净值":>7} {"日跌":>6} {"操作":<28} {"市值":>7} {"现金":>7} {"总资产":>7}')
+    print('-' * 83)
 
-        profit_pct = 0.0
-        if invested > 0:
-            profit_pct = (pos_value - invested) / invested * 100
+    for i, d in enumerate(dates):
+        sv = db_sent[d]; nav = pv[d]
+        dc = (nav - prev) / prev * 100 if prev else 0; prev = nav
+        pv2 = shares * nav; tot = cash + pv2
+        pnl = (pv2 - invested) / invested * 100 if invested > 0 else 0
+        act = ''
+        m = ma20(dates, i)
 
-        action = ""
-
-        # [Sell] priority
         if shares > 0:
-            if sentiment >= 1.0:
-                cash += pos_value
-                action = f"清仓(情绪{sentiment:+.1f})"
-                shares = 0.0
-                invested = 0.0
-                total_trades += 1
-            elif profit_pct >= 2.0:
-                half_value = pos_value * 0.5
-                half_shares = half_value / nav
-                cash += half_value
-                shares -= half_shares
-                invested *= 0.5
-                action = f"卖一半(盈利+{profit_pct:.1f}%)"
-                total_trades += 1
-            elif profit_pct <= -3.0:
-                cash += pos_value
-                action = f"清仓(亏损{profit_pct:.1f}%)"
-                shares = 0.0
-                invested = 0.0
-                loss_sell_today = True
-                total_trades += 1
+            trail_hi = max(trail_hi, nav)
+            trail_pnl = (nav - trail_hi) / trail_hi * 100
+            if sv >= P["sell_all_sv"]:
+                cash += pv2; act = f'清仓(情绪{sv:+.1f}≥{P["sell_all_sv"]})'; shares = 0; invested = 0; trades += 1; trail_hi = 0
+            elif P["sell_half_sv"] and sv >= P["sell_half_sv"] and not sold_half:
+                half_v = pv2 * 0.5; cash += half_v; shares *= 0.5; invested *= 0.5
+                act = f'卖一半(情绪{sv:+.1f}≥{P["sell_half_sv"]})'; trades += 1; sold_half = True
+            elif P["trailing_stop_pct"] and trail_pnl <= P["trailing_stop_pct"]:
+                cash += pv2; act = f'回撤止损(从峰值{trail_pnl:.1f}%)'; shares = 0; invested = 0; trades += 1; trail_hi = 0
+            elif pnl <= P["stop_loss_pct"]:
+                cash += pv2; act = f'止损({pnl:.1f}%)'; shares = 0; invested = 0; trades += 1; trail_hi = 0
+            elif P["take_profit_pct"] and pnl >= P["take_profit_pct"] and not sold_half:
+                half_v = pv2 * 0.5; cash += half_v; shares -= half_v / nav; invested *= 0.5
+                act = f'止盈一半(+{pnl:.1f}%)'; trades += 1; sold_half = True
 
-        pos_value = shares * nav
-        total_value = cash + pos_value
+        if shares == 0 and cash > 0:
+            amt = min(MAX_INVEST, cash)
+            if sv <= P["buyA_sv_max"] and dc <= P["buyA_dc_min"] and amt >= 100:
+                shares = amt / nav; cash -= amt; invested = amt
+                act = f'买A抄底(sv{sv:+.1f},跌{dc:.1f}%)'; trades += 1
+            elif P["buyB"] and P["buyB"]["sv_min"] <= sv <= P["buyB"]["sv_max"] and m and nav > m and amt >= 100:
+                pos = P["buyB"]["position"]
+                amt = amt * pos
+                shares = amt / nav; cash -= amt; invested = amt
+                pf = '全' if pos >= 1 else f'{pos*100:.0f}%'
+                act = f'买B趋势({pf}仓sv{sv:+.1f},价>20MA{m:.4f})'; trades += 1
 
-        # [Buy] - 亏损清仓后当日不再重复买入
-        if shares == 0 and cash > 0 and not loss_sell_today:
-            if sentiment <= -0.8 and daily_change <= -1.0:
-                buy_amount = min(MAX_INVEST, cash)
-                if buy_amount >= 100:
-                    buy_shares = buy_amount / nav
-                    shares = buy_shares
-                    cash -= buy_amount
-                    invested = buy_amount
-                    action = f"买入(情绪{sentiment:+.1f},跌{daily_change:.1f}%)"
-                    total_trades += 1
+        pv2 = shares * nav; tot = cash + pv2
+        if tot > peak: peak = tot
+        dd = (peak - tot) / peak * 100
+        if dd > mdd: mdd = dd
+        ps = f'{pv2:>7.0f}' if shares > 0 else f' 空仓 '
+        a = act if act else ('持有' if shares > 0 else '观望')
+        print(f'{d:12} {sv:>+5.1f} {nav:>7.4f} {dc:>+5.1f}% {a:<28} {ps:>7} {cash:>7.0f} {tot:>7.0f}')
 
-        pos_value = shares * nav
-        total_value = cash + pos_value
+    final = cash + shares * pv[dates[-1]]
+    ret = (final / CAPITAL - 1) * 100
+    print(f'  收益: {ret:+.2f}%  回撤: {mdd:.2f}%  交易: {trades}次')
+    results.append((label, ret, mdd, trades))
+    log.info(f'{VER["ver"]} {label}: 收益{ret:+.2f}% 回撤{mdd:.2f}% 交易{trades}次')
+    return ret, mdd, trades
 
-        if total_value > peak_value:
-            peak_value = total_value
-        dd = (peak_value - total_value) / peak_value * 100 if peak_value > 0 else 0
-        if dd > max_drawdown:
-            max_drawdown = dd
+# ── 运行 ──
+r1, d1, t1 = run('全周期', '2026-03-03', '2026-05-22')
+r2, d2, t2 = run('3月', '2026-03-03', '2026-03-31')
+r3, d3, t3 = run('4月', '2026-04-01', '2026-04-30')
+r4, d4, t4 = run('5月', '2026-05-01', '2026-05-22')
 
-        pos_str = f"{pos_value:>8.2f}" if shares > 0 else f"{'空仓':>8}"
-        action_str = action if action else ("持有" if shares > 0 else "观望")
-        print(f"{date:<12} {sentiment:>+5.1f} {nav:>8.4f} {daily_change:>+6.1f}% {action_str:<26} {pos_str:>10} {cash:>10.2f} {total_value:>10.2f}")
-
-    final_value = cash + shares * data_list[-1][2]
-    total_return = (final_value / start_cash - 1) * 100
-
-    print("-" * 92)
-    print(f"  期末总资产:      {final_value:>10.2f} 元")
-    print(f"  总收益率:        {total_return:>+8.2f}%")
-    print(f"  收益额:          {final_value - start_cash:>+10.2f} 元")
-    print(f"  交易次数:        {total_trades} 次")
-    print(f"  最大回撤:        {max_drawdown:>6.2f}%")
-
-    return final_value, max_drawdown
-
-
-# ===== 运行 =====
-mar_data = [d for d in raw_data if "2026-03-02" <= d[0] <= "2026-03-31"]
-mar_end, mar_mdd = run_simulation(mar_data, CAPITAL, "3月回测 (2026-03-03 ~ 2026-03-31)")
-
-apr_data = [d for d in raw_data if "2026-04-01" <= d[0] <= "2026-04-30"]
-apr_end, apr_mdd = run_simulation(apr_data, CAPITAL, "4月回测 (2026-04-01 ~ 2026-04-30)")
-
-print(f"\n\n{'='*65}")
-print(f"  3-4月整体汇总")
-print(f"{'='*65}")
-print()
-print(f"  {'指标':<20} {'3月':>12} {'4月':>12} {'合计':>12}")
-print(f"  {'-'*56}")
-print(f"  {'期初本金':<20} {CAPITAL:>12.2f} {CAPITAL:>12.2f} {CAPITAL:>12.2f}")
-print(f"  {'期末总资产':<20} {mar_end:>12.2f} {apr_end:>12.2f} {apr_end:>12.2f}")
-print(f"  {'月收益':<20} {mar_end-CAPITAL:>+12.2f} {apr_end-CAPITAL:>+12.2f} {apr_end-CAPITAL:>+10.2f}")
-print(f"  {'月收益率':<20} {(mar_end/CAPITAL-1)*100:>+11.2f}% {(apr_end/CAPITAL-1)*100:>+11.2f}% {(apr_end/CAPITAL-1)*100:>+10.2f}%")
-print(f"  {'最大回撤':<20} {mar_mdd:>11.2f}% {apr_mdd:>11.2f}%")
-
-print()
-mar_ret = (mar_end/CAPITAL-1)*100
-apr_ret = (apr_end/CAPITAL-1)*100
-print(f"  策略目标：月收益 2%~4%")
-print(f"  3月收益 {mar_ret:+.2f}% - {'达标' if mar_ret>=2 else '未达标'}")
-print(f"  4月收益 {apr_ret:+.2f}% - {'达标' if apr_ret>=2 else '未达标'}")
-print(f"  合计 {mar_ret+apr_ret:+.2f}%")
+# ── 写入回测结果表 ──
+if 'conn' in dir() and results:
+    try:
+        create_sql = """CREATE TABLE IF NOT EXISTS backtest_results (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            strategy_id INT NOT NULL, fund_code VARCHAR(10) NOT NULL,
+            period_label VARCHAR(20), initial_capital DECIMAL(12,2),
+            final_value DECIMAL(12,2), total_return DECIMAL(8,2),
+            max_drawdown DECIMAL(8,2), trade_count INT,
+            created_at DATETIME DEFAULT NOW(),
+            UNIQUE KEY uk_sfp (strategy_id, fund_code, period_label)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+        cur.execute(create_sql)
+        for label, ret, mdd, trades in results:
+            final_val = CAPITAL * (1 + ret / 100)
+            sql = """INSERT INTO backtest_results
+                (strategy_id,fund_code,period_label,initial_capital,final_value,total_return,max_drawdown,trade_count,created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                ON DUPLICATE KEY UPDATE total_return=VALUES(total_return),max_drawdown=VALUES(max_drawdown),
+                trade_count=VALUES(trade_count),final_value=VALUES(final_value),created_at=NOW()"""
+            cur.execute(sql, (VER_IDX, PRIMARY_FUND, label, CAPITAL, round(final_val,2), round(ret,2), round(mdd,2), trades))
+        conn.commit()
+        log.info(f'回测结果已写入 backtest_results ({len(results)}条)')
+    except Exception as e:
+        log.error(f'回测结果写入失败: {e}')
+    finally:
+        conn.close()

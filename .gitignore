@@ -12,8 +12,7 @@ __pycache__/
 venv/
 env/
 
-# 数据库导出（按需上传，不自动包含）
-db_export_*.sql
+# 数据库导出
 
 # 操作系统
 Thumbs.db
@@ -31,6 +30,7 @@ Thumbs.db
 *.err
 _output/
 temp/
+*result*.txt
 
 # 临时探索脚本
 _[a-z]*.py

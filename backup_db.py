@@ -76,7 +76,7 @@ conn.close()
 
 # Git
 os.chdir(OUTPUT_DIR)
-subprocess.run(['git', 'add', f'db_export_{date_str}.sql'], capture_output=True)
+subprocess.run(['git', 'add', '-f', f'db_export_{date_str}.sql'], capture_output=True)
 
 # Remove old exports from git tracking
 for f in olds[7:]:
