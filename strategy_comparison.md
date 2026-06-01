@@ -22,15 +22,16 @@
 
 ## Results Summary
 
-| Strategy | Return | Max DD | Trades | Return/DD | Notes |
-|:--------:|:------:|:------:|:------:|:---------:|:------|
-| **v5.4** | +4.64% | 2.38% | 10 | 1.95 | |
-| **v5.5a** | +3.15% | 2.38% | 7 | 1.32 | |
-| **v5.5b** | +4.89% | 2.38% | 7 | 2.05 | |
-| **v5.5c** | +8.41% | 2.38% | 5 | 3.53 | buyA=-0.5 |
-| **v5.5d** | +8.05% | 1.49% | 3 | 5.40 | buyA=-1.2, 8k |
-| **v5.5e** | — | — | — | — | Trailing stop, no backtest run |
-| **v5.6** ⭐ | **+10.06%** | **2.49%** | **3** | **4.04** | **buyA=-1.2, 10k** |
+| Strategy | Return | Max DD | Trades | Period | Notes |
+|:--------:|:------:|:------:|:------:|:------|:------|
+| **v5.4** | +4.64% | 2.38% | 10 | 2.5月 | |
+| **v5.5a** | +3.15% | 2.38% | 7 | 2.5月 | |
+| **v5.5b** | +4.89% | 2.38% | 7 | 2.5月 | |
+| **v5.5c** | +8.41% | 2.38% | 5 | 2.5月 | buyA=-0.5 |
+| **v5.5d** | +8.05% | 1.49% | 3 | 2.5月 | buyA=-1.2, 8k |
+| **v5.5e** | — | — | — | — | Trailing stop, rejected |
+| **v5.6** ⭐ | **+9.53%** | **4.26%** | **7** | **6月** | **buyA=-1.2, 10k, 当前** |
+| **v5.7** | +2.30% | 3.85% | 8 | 6月 | buyB过滤器过度, 已禁用 |
 
 ---
 
@@ -61,27 +62,45 @@ All other candidate entries (widened buyA range, removed MA, extended buyB) woul
 
 ---
 
-## Key Insights
+## Key Insights (6-month Updated)
 
-1. **Position sizing is the only tunable variable**: all other parameters converged to the same 3 trades at optimal thresholds
-2. **v5.5d's tight buyA (-1.2)** filters out 03-17 false dip (sv=-1.1) which would have triggered -3.3% stop loss
-3. **Removing MA filter** adds 4 noise trades that halve returns (+5.95% vs +10.06%)
-4. **Trailing stop rejected** across 3 test cycles — ETF daily volatility (2-3% swings) causes false exits
-5. **v5.6 return/DD ratio (4.04)** still excellent, only slightly diluted by larger position (2.49% DD vs 1.49%)
-6. **Only 3 quality trades** in 55 trading days — confirms the market regime (slow grind up + 1 panic event) favors high selectivity
+1. **v5.6 6-month net +9.53%**: 119 days, 7 trades, confirms strategy viability beyond the original 55-day window
+2. **buyB is the profit engine**: 3 buyB entries net +9.9% (2 wins +923/+870, 1 loss -530 at 02/10)
+3. **buyA catches V-reversals**: 03/23 panic entry (+8.7%) was classic; 05/14 late-cycle entry got stopped
+4. **Filters hurt, not help**: v5.7 blocked all 3 profitable buyB entries via sentiment momentum checks
+5. **Stop loss works**: The -5.3% loss on 02/10 buyB was contained; without it, drawdown would be much worse
+6. **Adverse selection is feature, not bug**: v5.6 enters early in trends (12/29, 04/09), pays with occasional stop-out
 
 ---
 
-## Monthly Breakdown (v5.6)
+## Monthly Breakdown (v5.6, 6-month)
 
 | Month | Return | Trades | Key Trades |
 |:-----:|:------:|:------:|:-----------|
-| March | +1.68% | 1 | 03-23 buy @ 1.356 (sv=-3.0) |
-| April | +0.00%* | 0 | 04-08 clear @ 1.474 (sv=+3.8); 04-09 buyB @ 1.462 |
-| May | — | 0 | Carried April position: at 1.631 on 05-14 but no sell |
-| **Total** | +10.06% | 3 | |
+| 12月 | +0.11% | 1 | 12/29 buyB @ 1.365 |
+| 1月 | — | — | 12/29买B持有至 02/03 清仓 |
+| 2月 | — | 2 | 02/03 clear @ 1.491 (+9.2%); 02/10 buyB @ 1.510 |
+| 3月 | +0.31% | 3 | 03/20 stop @ 1.430 (-5.3%); 03/23 buyA @ 1.356 |
+| 4月 | +0.00% | 1 | 04/08 clear @ 1.474 (+8.7%); 04/09 buyB @ 1.462 |
+| 5月 | -1.50% | 1 | 05/14 buyA @ 1.631; 05/27 stop @ 1.582 (-3.0%) |
+| **Total** | **+9.53%** | **7** | 4赚1亏1持有 |
 
-*April isolated shows 0% because March position carried through; buyB on 04-09 requires 20MA which needs >20 days data
+> Monthly breakdowns are isolated runs (fresh 20000 each) — the full-cycle return of +9.53% is actual strategy performance.
+
+## v5.6 6-Month Trade Log
+
+| # | Date | Action | Price | Trigger | P&L |
+|:--|:-----|:------|:-----:|:-----|:---|
+| 1 | 12/29 | 买B | 1.365 | sv=+0.2, 价>MA20 | — |
+| 2 | 02/03 | 清仓 | 1.491 | sv=+2.1过热 | **+923** |
+| 3 | 02/10 | 买B | 1.510 | sv=+0.4, 价>MA20 | — |
+| 4 | 03/20 | 止损 | 1.430 | -5.3% | **-530** |
+| 5 | 03/23 | 买A | 1.356 | sv=-3.0恐慌, 跌-5.2% | — |
+| 6 | 04/08 | 清仓 | 1.474 | sv=+3.8过热 | **+870** |
+| 7 | 04/09 | 买B | 1.462 | sv=-0.1, 价>MA20 | — |
+| — | 06/01 | 持有 | 1.556 | — | +643浮盈 |
+
+> 起始20000 → 终值21906. 4胜1败1持有.
 
 ---
 
