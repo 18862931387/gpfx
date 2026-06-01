@@ -1,5 +1,5 @@
 -- DataExport: data_analysis  2026-06-01
--- Time: 2026-06-01 12:16:56
+-- Time: 2026-06-01 12:18:23
 
 -- === market_daily_stats (57 rows) ===
 DROP TABLE IF EXISTS `market_daily_stats`;
@@ -100,11 +100,11 @@ CREATE TABLE `fund_history` (
   `update_time` datetime DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_fund_date` (`fund_code`,`net_date`)
-) ENGINE=InnoDB AUTO_INCREMENT=346 DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB AUTO_INCREMENT=349 DEFAULT CHARSET=utf8mb4;
 
-INSERT INTO `fund_history` (`id`, `fund_code`, `fund_name`, `net_date`, `unit_nav`, `accum_nav`, `daily_growth`, `purchase_status`, `redemption_status`, `dividend_status`, `create_time`, `update_time`) VALUES (1, '563300', '563300 CSI2000ETF', '2026-05-29', '1.5547', '1.5547', '-3.33', 'buy', 'sell', NULL, '2026-06-01 12:05:56', '2026-06-01 12:05:56');
-INSERT INTO `fund_history` (`id`, `fund_code`, `fund_name`, `net_date`, `unit_nav`, `accum_nav`, `daily_growth`, `purchase_status`, `redemption_status`, `dividend_status`, `create_time`, `update_time`) VALUES (2, '516330', '516330 IoT ETF', '2026-05-29', '1.7622', '1.7622', '-4.05', 'buy', 'sell', NULL, '2026-06-01 12:05:56', '2026-06-01 12:05:56');
-INSERT INTO `fund_history` (`id`, `fund_code`, `fund_name`, `net_date`, `unit_nav`, `accum_nav`, `daily_growth`, `purchase_status`, `redemption_status`, `dividend_status`, `create_time`, `update_time`) VALUES (3, '588090', '588090 STAR50 ETF', '2026-05-29', '1.8012', '1.2578', '-5.02', 'buy', 'sell', NULL, '2026-06-01 12:05:56', '2026-06-01 12:05:56');
+INSERT INTO `fund_history` (`id`, `fund_code`, `fund_name`, `net_date`, `unit_nav`, `accum_nav`, `daily_growth`, `purchase_status`, `redemption_status`, `dividend_status`, `create_time`, `update_time`) VALUES (1, '563300', '563300 CSI2000ETF', '2026-05-29', '1.5547', '1.5547', '-3.33', 'buy', 'sell', NULL, '2026-06-01 12:05:56', '2026-06-01 12:18:18');
+INSERT INTO `fund_history` (`id`, `fund_code`, `fund_name`, `net_date`, `unit_nav`, `accum_nav`, `daily_growth`, `purchase_status`, `redemption_status`, `dividend_status`, `create_time`, `update_time`) VALUES (2, '516330', '516330 IoT ETF', '2026-05-29', '1.7622', '1.7622', '-4.05', 'buy', 'sell', NULL, '2026-06-01 12:05:56', '2026-06-01 12:18:18');
+INSERT INTO `fund_history` (`id`, `fund_code`, `fund_name`, `net_date`, `unit_nav`, `accum_nav`, `daily_growth`, `purchase_status`, `redemption_status`, `dividend_status`, `create_time`, `update_time`) VALUES (3, '588090', '588090 STAR50 ETF', '2026-05-29', '1.8012', '1.2578', '-5.02', 'buy', 'sell', NULL, '2026-06-01 12:05:56', '2026-06-01 12:18:18');
 INSERT INTO `fund_history` (`id`, `fund_code`, `fund_name`, `net_date`, `unit_nav`, `accum_nav`, `daily_growth`, `purchase_status`, `redemption_status`, `dividend_status`, `create_time`, `update_time`) VALUES (41, '516330', '物联网ETF华泰柏瑞', '2026-04-29', '1.5789', '1.5789', '0.88', '场内买入', '场内卖出', '', '2026-04-30 12:53:14', '2026-05-05 18:43:23');
 INSERT INTO `fund_history` (`id`, `fund_code`, `fund_name`, `net_date`, `unit_nav`, `accum_nav`, `daily_growth`, `purchase_status`, `redemption_status`, `dividend_status`, `create_time`, `update_time`) VALUES (42, '516330', '物联网ETF华泰柏瑞', '2026-04-28', '1.5651', '1.5651', '-1.81', '场内买入', '场内卖出', '', '2026-04-30 12:53:14', '2026-05-05 18:43:23');
 INSERT INTO `fund_history` (`id`, `fund_code`, `fund_name`, `net_date`, `unit_nav`, `accum_nav`, `daily_growth`, `purchase_status`, `redemption_status`, `dividend_status`, `create_time`, `update_time`) VALUES (43, '516330', '物联网ETF华泰柏瑞', '2026-04-27', '1.5940', '1.5940', '2.15', '场内买入', '场内卖出', '', '2026-04-30 12:53:14', '2026-05-05 18:43:23');
