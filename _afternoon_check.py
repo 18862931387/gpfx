@@ -357,6 +357,27 @@ if ma20_val is None:
     except: pass
 above_ma20 = ma20_val and cur_p > ma20_val
 
+# v5.7 buyB enhanced: sentiment momentum + deviation + dynamic position
+buyB_sent_mom_ok = True
+buyB_dev_ok = True
+if VER["ver"] >= "v5.7" and P["buyB"]:
+    b_conf = P["buyB"]
+    if b_conf.get("sent_ma_days"):
+        try:
+            conn_tmp = pymysql.connect(**DB)
+            cur_tmp = conn_tmp.cursor()
+            cur_tmp.execute("SELECT trade_date, sentiment_value FROM market_sentiment ORDER BY trade_date DESC LIMIT 5")
+            rows = cur_tmp.fetchall()
+            conn_tmp.close()
+            if len(rows) >= b_conf["sent_ma_days"]:
+                # 取最近N天情绪均值，比较今天vs昨天
+                recent_avg = sum(float(r[1] or 0) for r in rows[:b_conf["sent_ma_days"]]) / b_conf["sent_ma_days"]
+                prev_avg = sum(float(r[1] or 0) for r in rows[1:b_conf["sent_ma_days"]+1]) / min(b_conf["sent_ma_days"], len(rows)-1)
+                buyB_sent_mom_ok = recent_avg > prev_avg
+        except: pass
+    if b_conf.get("ma_deviation_max") and ma20_val and cur_p:
+        buyB_dev_ok = (cur_p - ma20_val) / ma20_val <= b_conf["ma_deviation_max"]
+
 # 5. 判断信号
 fund_flow_pos = False
 if fund_flow and len(fund_flow) >= 5:
@@ -433,7 +454,14 @@ if fund_flow:
     print(f'  ④ 主力流入:  {"✅" if buy_cond4 else "❌"} ({flow_label})')
 
 print(f'\n  ═══ 操作建议 ═══')
+
+# v5.7 buyB enhanced check
+b_conf = P["buyB"] if P["buyB"] else None
+buyB_enhanced = b_conf and "position_max" in b_conf
+
 buyB_signal = has_buyB and above_ma20 and shares == 0 and cash >= 100
+if buyB_enhanced and buyB_signal:
+    buyB_signal = buyB_signal and buyB_sent_mom_ok and buyB_dev_ok
 
 if shares > 0:
     if sell_stop:
@@ -458,18 +486,33 @@ elif buy_signal:
     print(f'  ✅ 买A抄底! {bs}股 × {cur_p:.4f} = {bs*cur_p:.0f}元')
     print(f'    理由: {ZONE}恐慌 + 跌{pct:.1f}% + 放量/跌停确认{" + 主力抄底" if fund_flow_pos else ""}')
 elif buyB_signal:
-    amt = min(MAX_PER_TRADE * P["buyB"]["position"], cash)
+    # 动态仓位 (v5.7) / 固定仓位 (v5.6)
+    if buyB_enhanced:
+        rng = b_conf["sv_max"] - b_conf["sv_min"]
+        ratio = 1.0 - abs(SENT) / (rng / 2) if rng > 0 else 0.5
+        pos = b_conf["position_min"] + (b_conf["position_max"] - b_conf["position_min"]) * ratio
+    else:
+        pos = b_conf.get("position", 1.0)
+    amt = min(MAX_PER_TRADE * pos, cash)
     bs = int(amt / cur_p / 100) * 100
-    pf = '全' if P["buyB"]["position"] >= 1 else f'{P["buyB"]["position"]*100:.0f}%'
+    pf = f'{pos*100:.0f}%'
+    extras = ''
+    if buyB_enhanced:
+        extras = f' + SMA↗{b_conf.get("sent_ma_days","?")}d' if b_conf.get("sent_ma_days") else ''
     print(f'  📈 买B趋势({pf}仓)! {bs}股 × {cur_p:.4f} = {bs*cur_p:.0f}元')
-    print(f'    理由: 情绪{SENT:+.1f}中性 + 价{cur_p:.4f}>20MA{ma20_val:.4f}')
+    print(f'    理由: 情绪{SENT:+.1f}中性 + 价{cur_p:.4f}>20MA{ma20_val:.4f}{extras}')
 else:
     reasons = []
     if not buy_cond1: reasons.append(f'情绪不够低({SENT:+.1f}>{P["buyA_sv_max"]})')
     if not buy_cond2: reasons.append(f'跌幅不够({pct:+.1f}%>{P["buyA_dc_min"]}%)')
     if not buy_cond3: reasons.append(f'量价条件不满足')
     if fund_flow and not buy_cond4: reasons.append(f'主力未抄底')
-    if has_buyB and not above_ma20:
+    if has_buyB and buyB_enhanced and (not buyB_sent_mom_ok or not buyB_dev_ok):
+        blocks = []
+        if not buyB_sent_mom_ok: blocks.append(f'情绪均线未升({b_conf["sent_ma_days"]}d SMA)')
+        if not buyB_dev_ok: blocks.append(f'乖离过大({(cur_p-ma20_val)/ma20_val*100:+.1f}%)')
+        print(f'  📈 买B情绪OK，但被v5.7过滤: {", ".join(blocks)}')
+    elif has_buyB and not above_ma20:
         print(f'  📈 趋势信号: 情绪{SENT:+.1f}在买B范围，但价{cur_p:.4f}<20MA{ma20_val:.4f}，等待站上')
     elif has_buyB:
         print(f'  📈 趋势信号: 情绪{SENT:+.1f}在买B范围+价在20MA上，但现金不足(需≥100)')

@@ -118,11 +118,34 @@ VERSIONS = [
             "composite_wt": [0.3, 0.2, 0.1, 0.4],
         },
     },
+    {
+        "ver": "v5.7",
+        "active": "2026-06-01~",
+        "desc": "v5.6 + 买B情绪动量增强(3日情绪均线↑ + 动态仓位 + 乖离)",
+        "params": {
+            "buyA_sv_max": -1.2,
+            "buyA_dc_min": -1.0,
+            "buyB": {
+                "sv_min": -0.5, "sv_max": 0.5,
+                "position_max": 1.0,
+                "position_min": 0.5,
+                "sent_ma_days": 3,
+                "ma_deviation_max": 0.03,
+            },
+            "sell_half_sv": None,
+            "sell_all_sv": 2.0,
+            "stop_loss_pct": -3.0,
+            "trailing_stop_pct": None,
+            "take_profit_pct": None,
+            "max_invest": 10000,
+            "composite_wt": [0.3, 0.2, 0.1, 0.4],
+        },
+    },
 ]
 
 
 def get_latest():
-    return VERSIONS[-1]  # v5.6 (仓位1万, +10.06%)
+    return VERSIONS[-2]  # v5.6 (回测更优: +9.53% vs v5.7 +2.30%)
 
 
 def find(ver_str):

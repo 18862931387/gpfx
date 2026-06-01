@@ -17,7 +17,7 @@ VER_IDX = VERSIONS.index(VER) + 1
 try:
     conn = pymysql.connect(**DB)
     cur = conn.cursor()
-    cur.execute("SELECT trade_date, sentiment_value FROM market_sentiment WHERE trade_date >= '2026-03-03' AND sentiment_value IS NOT NULL ORDER BY trade_date")
+    cur.execute("SELECT trade_date, sentiment_value FROM market_sentiment WHERE sentiment_value IS NOT NULL ORDER BY trade_date")
     db_sent = {str(r[0]): float(r[1]) for r in cur.fetchall()}
     log.info(f'读取情绪数据 {len(db_sent)} 条')
 except Exception as e:
@@ -57,6 +57,12 @@ def ma20(dates, idx):
     vals = [pv[d] for d in seg if d in pv]
     return sum(vals)/len(vals) if len(vals) >= 15 else None
 
+def ma60(dates, idx):
+    if idx < 60: return None
+    seg = dates[idx-60:idx]
+    vals = [pv[d] for d in seg if d in pv]
+    return sum(vals)/len(vals) if len(vals) >= 45 else None
+
 results = []
 
 def run(label, start_date, end_date):
@@ -72,7 +78,16 @@ def run(label, start_date, end_date):
     print(f'\n{"="*75}')
     print(f'  {VER["ver"]} {label} | {dates[0]}~{dates[-1]} ({len(dates)}天)')
     b = P["buyB"]
-    b_desc = f'买B:情绪{b["sv_min"]}~{b["sv_max"]}&站上20日线{"半" if b["position"]<1 else ""}全仓' if b else ''
+    if b:
+        pos = b.get("position_max", b.get("position", 1.0))
+        extras = []
+        if b.get("sent_ma_days"): extras.append(f'SMA↗{b["sent_ma_days"]}d')
+        if b.get("ma_deviation_max"): extras.append(f'乖离<{b["ma_deviation_max"]*100:.0f}%')
+        extra_s = f' +{",".join(extras)}' if extras else ''
+        b_desc = f'买B:情绪{b["sv_min"]}~{b["sv_max"]}&站上20日线{pos*100:.0f}%仓{extra_s}'
+    else:
+        b_desc = ''
+        pos = 1.0
     print(f'  买A:情绪≤{P["buyA_sv_max"]}&跌≥{P["buyA_dc_min"]}% {b_desc}')
     print(f'  卖:≥{P["sell_all_sv"]}清仓', end='')
     if P["sell_half_sv"]: print(f'  {P["sell_half_sv"]}~{P["sell_all_sv"]}卖一半', end='')
@@ -114,11 +129,42 @@ def run(label, start_date, end_date):
                 shares = amt / nav; cash -= amt; invested = amt
                 act = f'买A抄底(sv{sv:+.1f},跌{dc:.1f}%)'; trades += 1
             elif P["buyB"] and P["buyB"]["sv_min"] <= sv <= P["buyB"]["sv_max"] and m and nav > m and amt >= 100:
-                pos = P["buyB"]["position"]
-                amt = amt * pos
-                shares = amt / nav; cash -= amt; invested = amt
-                pf = '全' if pos >= 1 else f'{pos*100:.0f}%'
-                act = f'买B趋势({pf}仓sv{sv:+.1f},价>20MA{m:.4f})'; trades += 1
+                b_conf = P["buyB"]
+                # 动态仓位: 情绪越接近0仓位越大
+                if "position_max" in b_conf:
+                    sv_range = b_conf["sv_max"] - b_conf["sv_min"]
+                    ratio = 1.0 - abs(sv) / (sv_range / 2) if sv_range > 0 else 0.5
+                    pos = b_conf["position_min"] + (b_conf["position_max"] - b_conf["position_min"]) * ratio
+                else:
+                    pos = b_conf.get("position", 1.0)
+
+                # 过滤1: 情绪动量 — 3日情绪均线上升 (v5.7+)
+                sent_mom_ok = True
+                if b_conf.get("sent_ma_days"):
+                    sd = b_conf["sent_ma_days"]
+                    sent_vals = [db_sent.get(dates[i - d], 0) for d in range(sd + 1) if (i - d) >= 0]
+                    sent_avg = sum(sent_vals) / len(sent_vals)
+                    sent_prev = sent_vals[1:] if len(sent_vals) > 1 else sent_vals  # exclude today
+                    sent_prev_avg = sum(sent_prev) / len(sent_prev) if sent_prev else sent_avg
+                    sent_mom_ok = sent_avg > sent_prev_avg  # sentiment recovering
+
+                # 过滤2: 乖离率
+                dev_ok = True
+                if b_conf.get("ma_deviation_max"):
+                    dev_ok = (nav - m) / m <= b_conf["ma_deviation_max"]
+
+                if sent_mom_ok and dev_ok:
+                    amt = amt * pos
+                    shares = amt / nav; cash -= amt; invested = amt
+                    pf = f'{pos*100:.0f}%'
+                    extras = []
+                    if b_conf.get("sent_ma_days"): extras.append(f'SMA↗{b_conf["sent_ma_days"]}d')
+                    if b_conf.get("ma_deviation_max"): extras.append(f'乖离<{b_conf["ma_deviation_max"]*100:.0f}%')
+                    act = f'买B趋势({pf}仓sv{sv:+.1f}{", "+",".join(extras) if extras else ""})'; trades += 1
+                else:
+                    blocks = []
+                    if not sent_mom_ok: blocks.append('情绪均线未升')
+                    if not dev_ok: blocks.append(f'乖离过大({(nav-m)/m*100:+.1f}%)')
 
         pv2 = shares * nav; tot = cash + pv2
         if tot > peak: peak = tot
@@ -135,11 +181,14 @@ def run(label, start_date, end_date):
     log.info(f'{VER["ver"]} {label}: 收益{ret:+.2f}% 回撤{mdd:.2f}% 交易{trades}次')
     return ret, mdd, trades
 
-# ── 运行 ──
-r1, d1, t1 = run('全周期', '2026-03-03', '2026-05-22')
-r2, d2, t2 = run('3月', '2026-03-03', '2026-03-31')
-r3, d3, t3 = run('4月', '2026-04-01', '2026-04-30')
-r4, d4, t4 = run('5月', '2026-05-01', '2026-05-22')
+# ── 运行: 6个月回测 ──
+r1, d1, t1 = run('全周期(6月)', '2025-12-01', '2026-06-01')
+r2, d2, t2 = run('12月', '2025-12-01', '2025-12-31')
+r3, d3, t3 = run('1月', '2026-01-01', '2026-01-31')
+r4, d4, t4 = run('2月', '2026-02-01', '2026-02-28')
+r5, d5, t5 = run('3月', '2026-03-01', '2026-03-31')
+r6, d6, t6 = run('4月', '2026-04-01', '2026-04-30')
+r7, d7, t7 = run('5月', '2026-05-01', '2026-05-31')
 
 # ── 写入回测结果表 ──
 if 'conn' in dir() and results:
