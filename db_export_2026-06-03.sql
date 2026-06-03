@@ -1,5 +1,5 @@
 -- DataExport: data_analysis  2026-06-03
--- Time: 2026-06-03 14:26:53
+-- Time: 2026-06-03 14:35:24
 
 -- === market_daily_stats (58 rows) ===
 DROP TABLE IF EXISTS `market_daily_stats`;
@@ -603,7 +603,7 @@ INSERT INTO `market_capital_flow` (`trade_date`, `main_force_net`, `retail_net`,
 INSERT INTO `market_capital_flow` (`trade_date`, `main_force_net`, `retail_net`, `medium_net`, `large_net`, `super_large_net`, `main_force_pct`, `retail_pct`, `medium_pct`, `large_pct`, `super_large_pct`, `create_time`, `update_time`) VALUES ('2026-05-29', '-42899849216.00', '24645406720.00', '18254442496.00', '-14700744704.00', '-28199104512.00', '-2.80', '1.61', '1.19', '-0.96', '-1.84', '2026-06-01 14:05:08', '2026-06-02 15:57:11');
 INSERT INTO `market_capital_flow` (`trade_date`, `main_force_net`, `retail_net`, `medium_net`, `large_net`, `super_large_net`, `main_force_pct`, `retail_pct`, `medium_pct`, `large_pct`, `super_large_pct`, `create_time`, `update_time`) VALUES ('2026-06-01', '-25660518400.00', '14556094464.00', '11104419840.00', '-8748765184.00', '-16911753216.00', '-1.94', '1.10', '0.84', '-0.66', '-1.28', '2026-06-02 15:57:11', '2026-06-02 15:57:11');
 INSERT INTO `market_capital_flow` (`trade_date`, `main_force_net`, `retail_net`, `medium_net`, `large_net`, `super_large_net`, `main_force_pct`, `retail_pct`, `medium_pct`, `large_pct`, `super_large_pct`, `create_time`, `update_time`) VALUES ('2026-06-02', '-2802397184.00', '7073861632.00', '-4271464448.00', '-8433422336.00', '5631025152.00', '-0.22', '0.55', '-0.33', '-0.66', '0.44', '2026-06-02 15:57:11', '2026-06-02 15:57:11');
-INSERT INTO `market_capital_flow` (`trade_date`, `main_force_net`, `retail_net`, `medium_net`, `large_net`, `super_large_net`, `main_force_pct`, `retail_pct`, `medium_pct`, `large_pct`, `super_large_pct`, `create_time`, `update_time`) VALUES ('2026-06-03', '-8911327232.00', '8437207040.00', NULL, '-17348534272.00', '-18042900480.00', NULL, NULL, NULL, NULL, NULL, '2026-06-03 14:13:10', '2026-06-03 14:23:10');
+INSERT INTO `market_capital_flow` (`trade_date`, `main_force_net`, `retail_net`, `medium_net`, `large_net`, `super_large_net`, `main_force_pct`, `retail_pct`, `medium_pct`, `large_pct`, `super_large_pct`, `create_time`, `update_time`) VALUES ('2026-06-03', '-12717826048.00', '6326255616.00', NULL, '-19044081664.00', '-16982855680.00', NULL, NULL, NULL, NULL, NULL, '2026-06-03 14:13:10', '2026-06-03 14:27:34');
 
 -- === sentiment_raw_factors (120 rows) ===
 DROP TABLE IF EXISTS `sentiment_raw_factors`;
@@ -2025,7 +2025,7 @@ INSERT INTO `market_news` (`id`, `trade_date`, `title`, `url`, `source`, `sentim
 INSERT INTO `market_news` (`id`, `trade_date`, `title`, `url`, `source`, `sentiment_score`, `pos_words`, `neg_words`, `create_time`) VALUES (177, '2026-06-03', '韩国股市今年20次触发“sidecar”临时停牌机制，为金融危机以来最多', 'https://finance.sina.com.cn/stock/usstock/c/2026-06-03/doc-iniacaeu4267080.shtml', '环球市场播报', '-2.00', NULL, '危机,停牌', '2026-06-03 14:26:52');
 INSERT INTO `market_news` (`id`, `trade_date`, `title`, `url`, `source`, `sentiment_score`, `pos_words`, `neg_words`, `create_time`) VALUES (178, '2026-06-03', '二审胜诉！ST任子行300311需赔偿股民，符合条件股民可登记索赔', 'https://finance.sina.com.cn/stock/gmwq/rightscase/2026-06-03/doc-iniacaew1043682.shtml', '市场资讯', '-2.00', NULL, 'ST,ST,索赔', '2026-06-03 14:26:52');
 
--- === etf_fund_flow (0 rows) ===
+-- === etf_fund_flow (1 rows) ===
 DROP TABLE IF EXISTS `etf_fund_flow`;
 CREATE TABLE `etf_fund_flow` (
   `id` int NOT NULL AUTO_INCREMENT,
@@ -2039,5 +2039,6 @@ CREATE TABLE `etf_fund_flow` (
   `create_time` datetime DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_fund_date` (`fund_code`,`trade_date`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+INSERT INTO `etf_fund_flow` (`id`, `trade_date`, `fund_code`, `main_force_net`, `retail_net`, `medium_net`, `large_net`, `super_large_net`, `create_time`) VALUES (1, '2026-06-03', '563300', '-10714793.00', '2929475.00', '7785318.00', '9788552.00', '-20503345.00', '2026-06-03 14:27:37');
