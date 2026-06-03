@@ -2,7 +2,7 @@
 
 > 项目路径：`D:\code\xlx\`
 > 最后更新：2026-06-03
-> MySQL 5.6 | 数据库：`data_analysis` | root/root123
+> MySQL: 192.168.3.68 | 数据库：`data_analysis` | root/root123
 > Git: `github.com/18862931387/gpfx` (SSH)
 > 当前版本：**v5.6** — 复合情绪+双买入+精简卖出+仓位1万
 > 服务器部署：详见 [DEPLOY.md](DEPLOY.md)

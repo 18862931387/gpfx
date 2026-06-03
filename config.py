@@ -1,6 +1,6 @@
 # 项目统一配置
 DB = {
-    'host': 'localhost',
+    'host': '192.168.3.68',
     'port': 3306,
     'user': 'root',
     'password': 'root123',
