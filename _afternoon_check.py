@@ -609,6 +609,21 @@ elif buy_signal:
     signal_type = 'buyA'; signal_reason = f'sv={SENT:+.1f}≤{P["buyA_sv_max"]},跌{pct:.1f}%'
 elif buyB_signal:
     signal_type = 'buyB'; signal_reason = f'sv={SENT:+.1f}中性,价>20MA'
+else:
+    reasons = []
+    if buy_cond1: reasons.append(f'情绪{SENT:+.1f}够恐慌')
+    elif not buy_cond1: reasons.append(f'情绪{SENT:+.1f}未达恐慌')
+    if buy_cond2: reasons.append(f'跌{pct:.1f}%够深')
+    elif not buy_cond2: reasons.append(f'跌{pct:.1f}%不够')
+    if buy_cond3: reasons.append('放量/跌停确认')
+    elif not buy_cond3: reasons.append('量价未确认')
+    if not buy_cond4 and fund_flow: reasons.append('主力未抄底')
+    if sell_stop: reasons.append(f'浮亏{pnl:.1f}%达止损')
+    if sell_sent: reasons.append(f'情绪{SENT:+.1f}过热')
+    if above_ma20 and shares == 0: reasons.append('价在MA上')
+    elif not above_ma20 and shares > 0: reasons.append('价在MA下持币观望')
+    signal_type = 'hold'
+    signal_reason = ' | '.join(reasons[:4]) if reasons else '条件未满足'
 if signal_type:
     try:
         import pymysql
