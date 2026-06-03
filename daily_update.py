@@ -12,6 +12,19 @@ from logger import get_logger
 log = get_logger('daily_update')
 date_str = __import__('datetime').date.today().isoformat()
 
+def api_get(url, params=None, headers=None, timeout=15, retries=2):
+    for attempt in range(retries + 1):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=timeout)
+            if r.status_code == 200:
+                return r
+        except Exception as e:
+            if attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise e
+    return None
+
 try:
     conn = pymysql.connect(**DB)
     cur = conn.cursor()
@@ -118,37 +131,73 @@ tables_sql = {
         create_time DATETIME DEFAULT NOW(),
         UNIQUE KEY uk_fund_date (fund_code, trade_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
+    'sector_fund_flow': '''CREATE TABLE IF NOT EXISTS sector_fund_flow (
+        id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        trade_date DATE NOT NULL,
+        sector_name VARCHAR(50) NOT NULL,
+        sector_type VARCHAR(20) COMMENT '行业资金流/概念资金流',
+        main_force_net DECIMAL(20,2) COMMENT '主力净流入',
+        super_large_net DECIMAL(20,2) COMMENT '超大单净流入',
+        large_net DECIMAL(20,2) COMMENT '大单净流入',
+        medium_net DECIMAL(20,2) COMMENT '中单净流入',
+        retail_net DECIMAL(20,2) COMMENT '散户净流入',
+        create_time DATETIME DEFAULT NOW(),
+        KEY idx_date (trade_date),
+        UNIQUE KEY uk_sector_date (sector_name, sector_type, trade_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
 }
 for t, s in tables_sql.items():
     cur.execute(s)
 
 log.info(f'=== Data Update {date_str} ===')
 
-# 1. Index K-line (Tencent)
+# 1. Index K-line (Tencent + baostock 双重保障)
 indices_api = {
-    'sh000001': 'SH Index', 'sz399001': 'SZ Component', 'sz399006': 'ChiNext',
-    'sh000688': 'STAR 50', 'sh000300': 'CSI 300', 'sh000852': 'CSI 1000',
+    'sh000001': ('SH Index', 'sh.000001'),
+    'sz399001': ('SZ Component', 'sz.399001'),
+    'sz399006': ('ChiNext', 'sz.399006'),
+    'sh000688': ('STAR 50', 'sh.000688'),
+    'sh000300': ('CSI 300', 'sh.000300'),
+    'sh000852': ('CSI 1000', 'sh.000852'),
 }
-for code, name in indices_api.items():
+for code, (name, bs_code) in indices_api.items():
+    got = None
     try:
-        r = requests.get(TENCENT_KLINE,
-            params={'param': f'{code},day,,,5,qfq'}, headers=HDR, timeout=10)
-        items = r.json().get('data', {}).get(code, {}).get('day', [])
-        if items:
-            last = items[-1]
-            log.info(f'  {name}: {last[0]} close={last[2]}')
-    except Exception as e:
-        log.warning(f'  {name}: 获取失败 {e}')
+        r = api_get(TENCENT_KLINE,
+            params={'param': f'{code},day,,,1,qfq'}, headers=HDR, timeout=10)
+        if r:
+            items = r.json().get('data', {}).get(code, {}).get('day', [])
+            if items:
+                last = items[-1]
+                got = f'{last[0]} close={last[2]}'
+                log.info(f'  {name}: {got}')
+    except: pass
+    if not got:
+        try:
+            import baostock as bs
+            lg = bs.login()
+            if lg.error_code == '0':
+                rs = bs.query_history_k_data_plus(bs_code,
+                    "date,close", start_date="2026-05-20", end_date="2026-06-03",
+                    frequency="d", adjustflag="2")
+                rows = []
+                while rs.next():
+                    rows.append(rs.get_row_data())
+                bs.logout()
+                if rows:
+                    log.info(f'  {name}: baostock兜底 {rows[-1][0]} close={rows[-1][1]}')
+        except: pass
 
 # 1b. Index daily % backup (write to index_daily for _afternoon_check fallback)
 try:
     idx_pcts = {}
     idx_map = {'sh000001': 'sh_pct', 'sz399001': 'sz_pct', 'sz399006': 'cy_pct', 'sh000852': 'zz2000_pct'}
     for code, col in idx_map.items():
-        r = requests.get(f'https://web.sqt.gtimg.cn/q={code}', headers=HDR, timeout=10)
-        parts = r.text.replace('"', '').split('~')
-        if len(parts) > 32:
-            idx_pcts[col] = float(parts[32])
+        r = api_get(f'https://web.sqt.gtimg.cn/q={code}', headers=HDR, timeout=10)
+        if r:
+            parts = r.text.replace('"', '').split('~')
+            if len(parts) > 32:
+                idx_pcts[col] = float(parts[32])
     if idx_pcts:
         sql = """INSERT INTO index_daily (trade_date,sh_pct,sz_pct,cy_pct,zz2000_pct,create_time)
         VALUES (%s,%s,%s,%s,%s,NOW())
@@ -158,82 +207,110 @@ try:
 except Exception as e:
     log.warning(f'  Index daily backup 写入失败: {e}')
 
-# 1c. Market daily stats (limit_up/down + turnover from push2)
+# 1c. Market daily stats (limit_up/down + turnover)
+zt, dt = 0, 0
 try:
-    # 涨跌停: 全A股, 统计涨跌幅>=9.9%和<=-9.9%
+    import akshare as ak
+    today_key = date_str.replace('-', '')
+    zt_df = ak.stock_zt_pool_em(date=today_key)
+    dt_df = ak.stock_zt_pool_dtgc_em(date=today_key)
+    zt, dt = len(zt_df), len(dt_df)
+    log.info(f'  akshare涨停跌停: {zt}涨停 {dt}跌停')
+except Exception as e:
+    log.warning(f'  akshare涨停跌停失败: {e}')
+# 成交额: 上证+深证 (push2)
+tv_total = None
+try:
     clist_headers = {**HDR, 'Referer': 'https://quote.eastmoney.com/'}
-    clist_params = {
-        'pn': 1, 'pz': 5000, 'po': 1, 'np': 1,
-        'ut': EASTMONEY_UT,
-        'fltt': 2, 'invt': 2, 'fid': 'f3',
-        'fs': 'm:0+t:6,m:0+t:13,m:1+t:2,m:1+t:23',
-        'fields': 'f3',
-    }
-    r = requests.get('https://push2.eastmoney.com/api/qt/clist/get',
-        params=clist_params, headers=clist_headers, timeout=15)
-    items = r.json().get('data', {}).get('diff', [])
-    zt = sum(1 for i in items if i.get('f3', 0) and float(i['f3']) >= 9.9)
-    dt = sum(1 for i in items if i.get('f3', 0) and float(i['f3']) <= -9.9)
-
-    # 成交额: 上证+深证
-    tv_sh = 0.0
-    tv_sz = 0.0
+    tv_sh, tv_sz = 0.0, 0.0
     for secid in ('1.000001', '0.399001'):
         try:
-            r2 = requests.get('https://push2.eastmoney.com/api/qt/stock/get',
+            r2 = api_get('https://push2.eastmoney.com/api/qt/stock/get',
                 params={'secid': secid, 'fields': 'f48'}, headers=clist_headers, timeout=10)
-            tv_val = r2.json().get('data', {}).get('f48', 0) or 0
-            if secid == '1.000001': tv_sh = tv_val
-            else: tv_sz = tv_val
+            if r2:
+                tv_val = r2.json().get('data', {}).get('f48', 0) or 0
+                if secid == '1.000001': tv_sh = tv_val
+                else: tv_sz = tv_val
         except: pass
     tv_total = round((tv_sh + tv_sz) / 1e8, 2) if (tv_sh or tv_sz) else None
-
-    if zt or dt or tv_total:
+except: pass
+if zt > 0 or dt > 0 or tv_total:
+    if tv_total:
         sql = """INSERT INTO market_daily_stats (trade_date,limit_up,limit_down,turnover,create_time,update_time)
         VALUES (%s,%s,%s,%s,NOW(),NOW())
         ON DUPLICATE KEY UPDATE limit_up=VALUES(limit_up),limit_down=VALUES(limit_down),turnover=VALUES(turnover),update_time=NOW()"""
         cur.execute(sql, (date_str, zt, dt, tv_total))
-        log.info(f'  Market Stats: {zt}涨停 {dt}跌停 {tv_total}亿')
-except Exception as e:
-    log.warning(f'  Market Stats 获取失败: {e}')
+    else:
+        sql = """INSERT INTO market_daily_stats (trade_date,limit_up,limit_down,create_time,update_time)
+        VALUES (%s,%s,%s,NOW(),NOW())
+        ON DUPLICATE KEY UPDATE limit_up=VALUES(limit_up),limit_down=VALUES(limit_down),update_time=NOW()"""
+        cur.execute(sql, (date_str, zt, dt))
+    log.info(f'  Market Stats: {zt}涨停 {dt}跌停 {tv_total or "沿用旧值"}亿')
 
-# 2. Fund NAV (East Money)
+# 2. Fund NAV (East Money, 只取最新净值)
 funds = [('563300','563300 CSI2000ETF'),('516330','516330 IoT ETF'),('588090','588090 STAR50 ETF')]
 for code, name in funds:
     try:
-        r = requests.get(EASTMONEY_FUND, params={'fundCode': code, 'pageIndex': 1, 'pageSize': 5},
+        r = api_get(EASTMONEY_FUND, params={'fundCode': code, 'pageIndex': 1, 'pageSize': 1},
             headers={**HDR, 'Referer': FUND_REFERER}, timeout=10)
-        txt = r.text; s, e = txt.find('{'), txt.rfind('}')
-        rows = json.loads(txt[s:e+1]).get('Data',{}).get('LSJZList',[]) if s>=0 else []
-        for row in rows[:1]:
-            dt, nav, acc, gr = row.get('FSRQ',''), row.get('DWJZ'), row.get('LJJZ'), row.get('JZZZL','')
-            gr_val = gr.replace('%','') if gr else 'NULL'
-            sql = """INSERT INTO fund_history (fund_code,fund_name,net_date,unit_nav,accum_nav,daily_growth,create_time,update_time)
-            VALUES (%s,%s,%s,%s,%s,%s,NOW(),NOW())
-            ON DUPLICATE KEY UPDATE unit_nav=VALUES(unit_nav),accum_nav=VALUES(accum_nav),daily_growth=VALUES(daily_growth),update_time=NOW()"""
+        if r:
+            txt = r.text; s, e = txt.find('{'), txt.rfind('}')
+            rows = json.loads(txt[s:e+1]).get('Data',{}).get('LSJZList',[]) if s>=0 else []
+            for row in rows[:1]:
+                dt, nav, acc, gr = row.get('FSRQ',''), row.get('DWJZ'), row.get('LJJZ'), row.get('JZZZL','')
+                gr_val = gr.replace('%','') if gr else 'NULL'
+                sql = """INSERT INTO fund_history (fund_code,fund_name,net_date,unit_nav,accum_nav,daily_growth,create_time,update_time)
+                VALUES (%s,%s,%s,%s,%s,%s,NOW(),NOW())
+                ON DUPLICATE KEY UPDATE unit_nav=VALUES(unit_nav),accum_nav=VALUES(accum_nav),daily_growth=VALUES(daily_growth),update_time=NOW()"""
             cur.execute(sql, (code, name, dt, float(nav), float(acc), float(gr_val)))
             log.info(f'  {name}: {dt} nav={nav} growth={gr}')
+        else:
+            log.warning(f'  {name}: API无返回')
     except Exception as e:
         log.warning(f'  {name}: NAV获取失败 {e}')
 
-# 3. ETF K-line cache (Tencent, 60日前复权)
+# 3. ETF K-line cache (Tencent + baostock 双重保障, 60日前复权)
 etf_kline_count = 0
 for code, name in funds:
+    klines = []
+    # 优先腾讯
     try:
-        r = requests.get(TENCENT_KLINE,
+        r = api_get(TENCENT_KLINE,
             params={'param': f'sh{code},day,,,60,qfq'}, headers=HDR, timeout=10)
-        data = r.json().get('data', {}).get(f'sh{code}', {})
-        klines = data.get('qfqday', data.get('day', []))
-        for k in klines:
-            if len(k) < 5: continue
-            sql = """INSERT INTO etf_kline (fund_code,trade_date,open,high,low,close,volume,is_adj,create_time)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,1,NOW())
-            ON DUPLICATE KEY UPDATE open=VALUES(open),high=VALUES(high),low=VALUES(low),close=VALUES(close),volume=VALUES(volume)"""
-            cur.execute(sql, (code, k[0], k[1], k[3], k[4], k[2], k[5] if len(k) >= 6 else None))
-            etf_kline_count += 1
+        if r:
+            data = r.json().get('data', {}).get(f'sh{code}', {})
+            klines = data.get('qfqday', data.get('day', []))
+    except: pass
+    # 腾讯失败 → baostock 兜底
+    if not klines:
+        try:
+            import baostock as bs
+            lg = bs.login()
+            if lg.error_code == '0':
+                prefix = 'sh' if code[0] in ('5','6','9') else 'sz'
+                rs = bs.query_history_k_data_plus(f"{prefix}.{code}",
+                    "date,open,high,low,close,volume,adjustflag",
+                    start_date="2026-03-01", end_date="2026-06-03",
+                    frequency="d", adjustflag="2")
+                while rs.next():
+                    r = rs.get_row_data()
+                    if r[0] and r[1]:
+                        klines.append(r)
+                bs.logout()
+                if klines:
+                    log.info(f'  {name} K-line: baostock兜底 {len(klines)} rows')
+        except: pass
+    for k in klines:
+        if len(k) < 5: continue
+        sql = """INSERT INTO etf_kline (fund_code,trade_date,open,high,low,close,volume,is_adj,create_time)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,1,NOW())
+        ON DUPLICATE KEY UPDATE open=VALUES(open),high=VALUES(high),low=VALUES(low),close=VALUES(close),volume=VALUES(volume)"""
+        cur.execute(sql, (code, k[0], k[1], k[3], k[4], k[2], k[5] if len(k) >= 6 else None))
+        etf_kline_count += 1
+    if klines:
         log.info(f'  {name} K-line: {len(klines)} rows cached')
-    except Exception as e:
-        log.warning(f'  {name} K-line: 获取失败 {e}')
+    else:
+        log.warning(f'  {name} K-line: 腾讯+baostock均失败')
 if etf_kline_count:
     log.info(f'  ETF K-line: {etf_kline_count} rows total')
 
@@ -273,11 +350,12 @@ for attempt in range(3):
 for code in [PRIMARY_FUND] + [f[0] for f in funds]:
     try:
         sid = f"1.{code}" if code[0] in ('5','6','9') else f"0.{code}"
-        r = requests.get('https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get',
+        r = api_get('https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get',
             params={'secid': sid, 'fields1': 'f1,f2,f3,f4,f5',
                     'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
                     'lmt': '5', 'ut': EASTMONEY_UT},
             headers={**HDR, 'Referer': 'https://data.eastmoney.com/'}, timeout=10)
+        if not r: continue
         klines = r.json().get('data',{}).get('klines',[])
         cnt = 0
         for k in klines:
@@ -293,22 +371,52 @@ for code in [PRIMARY_FUND] + [f[0] for f in funds]:
     except Exception as e:
         log.warning(f'  {code} 个股资金流: {e}')
 
+# 6. 板块资金流向 (akshare 行业+概念)
+for stype in ('行业资金流', '概念资金流'):
+    for attempt in range(2):
+        try:
+            import akshare as ak
+            df = ak.stock_sector_fund_flow_rank(indicator='今日', sector_type=stype)
+            cnt = 0
+            for _, r in df.iterrows():
+                sql = """INSERT INTO sector_fund_flow (trade_date,sector_name,sector_type,main_force_net,super_large_net,large_net,medium_net,retail_net,create_time)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                ON DUPLICATE KEY UPDATE main_force_net=VALUES(main_force_net),super_large_net=VALUES(super_large_net),large_net=VALUES(large_net),medium_net=VALUES(medium_net),retail_net=VALUES(retail_net)"""
+                cur.execute(sql, (
+                    date_str, r['名称'], stype,
+                    float(r['今日主力净流入-净额']),
+                    float(r['今日超大单净流入-净额']),
+                    float(r['今日大单净流入-净额']),
+                    float(r['今日中单净流入-净额']),
+                    float(r['今日散户净流入-净额']),
+                ))
+                cnt += 1
+            if cnt:
+                log.info(f'  {stype}: {cnt} 个板块已入库')
+            break
+        except Exception as e:
+            if attempt == 0: time.sleep(2)
+            else: log.warning(f'  {stype} 采集失败: {e}')
+
 conn.commit(); conn.close()
 log.info('=== Update Complete ===')
 if not flow_ok:
     log.warning('  (Market flow data was not updated - API will retry on next run)')
 
-# 5. News sentiment (Sina feed)
-try:
-    from news_sentiment import save_to_db, fetch_news
-    articles, today = fetch_news()
-    if articles:
-        n = save_to_db(articles, today)
-        log.info(f'  News sentiment: {n} articles saved')
-    else:
-        log.warning('  News fetch returned 0 articles')
-except Exception as e:
-    log.warning(f'  News sentiment 获取失败: {e}')
+# 5. News sentiment (Sina feed, 带重试)
+for _ in range(2):
+    try:
+        from news_sentiment import save_to_db, fetch_news
+        articles, today = fetch_news()
+        if articles:
+            n = save_to_db(articles, today)
+            log.info(f'  News sentiment: {n} articles saved')
+        else:
+            log.warning('  News fetch returned 0 articles')
+        break
+    except Exception as e:
+        log.warning(f'  News sentiment 获取失败(重试): {e}')
+        time.sleep(2)
 
 # 数据库备份到 git
 try:
@@ -318,6 +426,7 @@ try:
     if result.returncode == 0:
         log.info('DB backup + git push OK')
     else:
-        log.warning(f'Backup failed: {result.stderr.strip()[:100]}')
+        err = result.stderr.strip()[:150] or result.stdout.strip()[:150]
+        log.warning(f'Backup issue: {err}')
 except Exception as e:
     log.warning(f'Backup skipped: {e}')

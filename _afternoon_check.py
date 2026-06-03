@@ -100,68 +100,77 @@ idx_cur = float(idx[3]) if len(idx) > 3 else 0
 idx_pre = float(idx[4]) if len(idx) > 4 else 0
 idx_pct = (idx_cur - idx_pre) / idx_pre * 100 if idx_pre else 0
 
-# 2. 最近市场量价 — 三级策略: DB今日 > push2实时 > DB昨日兜底
+# 2. 最近市场量价 — 三级策略: akshare > push2分页 > DB兜底
 tv, lu, ld, db_today = 0, 0, 0, False
 margin_chg = 0.0  # 融资余额5日变化率
+today_str = TODAY.replace('-', '')
+# 优先akshare获取涨停跌停股池
+try:
+    import akshare as ak
+    zt_df = ak.stock_zt_pool_em(date=today_str)
+    dt_df = ak.stock_zt_pool_dtgc_em(date=today_str)
+    lu, ld = len(zt_df), len(dt_df)
+    if lu > 0 or ld > 0:
+        db_today = True
+        print(f'  📊 akshare实时: 涨停{lu} 跌停{ld}')
+except:
+    pass
+# 成交额: 尝试push2获取
+try:
+    clist_h = {**HDR, 'Referer': 'https://quote.eastmoney.com/'}
+    for sid in ('1.000001','0.399001'):
+        try:
+            r3 = requests.get('https://push2.eastmoney.com/api/qt/stock/get',
+                params={'secid':sid,'fields':'f48'}, headers=clist_h, timeout=10)
+            tv += (r3.json().get('data',{}).get('f48') or 0)
+        except: pass
+    tv = round(tv/1e8, 2) if tv else None
+except: pass
+# 成交额/涨停/跌停有缺失时→从DB兜底
+if not tv or (lu == 0 and ld == 0):
+    try:
+        import pymysql
+        conn = pymysql.connect(**DB)
+        cur = conn.cursor()
+        cur.execute("SELECT trade_date, turnover, limit_up, limit_down FROM market_daily_stats ORDER BY trade_date DESC LIMIT 1")
+        r = cur.fetchone()
+        if r:
+            if not tv: tv = float(r[1] or 0)
+            if lu == 0 and ld == 0:
+                lu, ld = int(r[2] or 0), int(r[3] or 0)
+        conn.close()
+    except: pass
+# 融资余额: 取最近两条，计算5日变化率
 try:
     import pymysql
     conn = pymysql.connect(**DB)
     cur = conn.cursor()
-    cur.execute("SELECT trade_date, turnover, limit_up, limit_down FROM market_daily_stats ORDER BY trade_date DESC LIMIT 1")
-    r = cur.fetchone()
-    if r:
-        db_today = str(r[0]) == TODAY
-        if db_today:
-            tv, lu, ld = float(r[1] or 0), int(r[2] or 0), int(r[3] or 0)
-        else:
-            # 今日无DB → 实时抓push2
-            print(f'  🔄 DB无今日数据，实时抓取push2...', end='')
-            try:
-                clist_h = {**HDR, 'Referer': 'https://quote.eastmoney.com/'}
-                p = {'pn':1,'pz':5000,'po':1,'np':1,'ut':UT,'fltt':2,'invt':2,'fid':'f3',
-                     'fs':'m:0+t:6,m:0+t:13,m:1+t:2,m:1+t:23','fields':'f3'}
-                r2 = requests.get('https://push2.eastmoney.com/api/qt/clist/get', params=p, headers=clist_h, timeout=15)
-                items = r2.json().get('data',{}).get('diff',[])
-                lu = sum(1 for i in items if i.get('f3') and float(i['f3']) >= 9.9)
-                ld = sum(1 for i in items if i.get('f3') and float(i['f3']) <= -9.9)
-                # 成交额: 上证+深证
-                tv = 0.0
-                for sid in ('1.000001','0.399001'):
-                    try:
-                        r3 = requests.get('https://push2.eastmoney.com/api/qt/stock/get',
-                            params={'secid':sid,'fields':'f48'}, headers=clist_h, timeout=10)
-                        tv += (r3.json().get('data',{}).get('f48') or 0)
-                    except: pass
-                tv = round(tv/1e8, 2) if tv else None
-                print(f' 涨停{lu} 跌停{ld} 成交{tv}亿')
-            except Exception as e:
-                # push2失败 → 用昨日DB兜底
-                tv, lu, ld = float(r[1] or 0), int(r[2] or 0), int(r[3] or 0)
-                print(f' push2异常({e}), 用DB最近交易日({r[0]})兜底')
-    # 融资余额: 取最近两条，计算5日变化率
     cur.execute("SELECT trade_date, margin_balance FROM sentiment_raw_factors WHERE margin_balance IS NOT NULL ORDER BY trade_date DESC LIMIT 10")
     margins = [(str(r[0]), float(r[1])) for r in cur.fetchall()]
     if len(margins) >= 5:
         latest = margins[0][1]
         t5 = margins[-1][1] if len(margins) > 5 else margins[min(4, len(margins)-1)][1]
-        if t5 > 0: margin_chg = (latest - t5) / t5 * 100  # 5日变化率%
+        if t5 > 0: margin_chg = (latest - t5) / t5 * 100
     conn.close()
 except: pass
 
-# 3. 大盘资金流向明细 (push2实时)
+# 3. 大盘资金流向明细 (push2实时, 带重试)
 main_force_net = 0.0
 large_net = super_large_net = retail_net = 0.0
-try:
-    r = requests.get('https://push2.eastmoney.com/api/qt/ulist.np/get',
-        params={'fltt':2,'secids':'1.000001,0.399001','fields':'f62,f66,f72,f78'},
-        headers=PUSH2_HDR, timeout=10)
-    diff = r.json().get('data',{}).get('diff',[])
-    if diff:
-        main_force_net = sum(d['f62'] for d in diff if d.get('f62'))
-        large_net = sum(d['f72'] for d in diff if d.get('f72'))
-        super_large_net = sum(d['f78'] for d in diff if d.get('f78'))
-        retail_net = sum(d['f66'] for d in diff if d.get('f66'))
-except: pass
+for retry in range(2):
+    try:
+        r = requests.get('https://push2.eastmoney.com/api/qt/ulist.np/get',
+            params={'fltt':2,'secids':'1.000001,0.399001','fields':'f62,f66,f72,f78'},
+            headers=PUSH2_HDR, timeout=10)
+        raw = r.json()
+        diff = raw.get('data',{}).get('diff',[])
+        if diff and len(diff) >= 2:
+            main_force_net = sum(d.get('f62',0) or 0 for d in diff)
+            large_net = sum(d.get('f72',0) or 0 for d in diff)
+            super_large_net = sum(d.get('f78',0) or 0 for d in diff)
+            retail_net = sum(d.get('f66',0) or 0 for d in diff)
+        if main_force_net != 0: break
+    except: pass
 
 # 3b. 北向资金净流入 (akshare 实时)
 northbound_net = 0.0
@@ -470,6 +479,18 @@ try:
 except: pass
 if hgt_val is not None:
     print(f'  北向资金: 沪+{hgt_val:.1f}亿  深+{sgt_val:.1f}亿')
+# 板块资金流向 (优先DB, 兜底实时)
+try:
+    import pymysql
+    conn_s = pymysql.connect(**DB)
+    cur_s = conn_s.cursor()
+    cur_s.execute("SELECT sector_name,main_force_net/1e8,super_large_net/1e8 FROM sector_fund_flow WHERE trade_date=%s AND sector_type='行业资金流' ORDER BY ABS(main_force_net) DESC LIMIT 5", (TODAY,))
+    rows_s = cur_s.fetchall()
+    conn_s.close()
+    if rows_s:
+        for r_s in rows_s:
+            print(f'  行业 {r_s[0]}: 主力{float(r_s[1]):+.0f}亿  超大单{float(r_s[2]):+.0f}亿')
+except: pass
 if ind_top:
     top_str = '  '.join([f'{r["name"]}{r["change"]:+.1f}%' for r in ind_top[:3]])
     bot_str = '  '.join([f'{r["name"]}{r["change"]:+.1f}%' for r in ind_bot[:3]])

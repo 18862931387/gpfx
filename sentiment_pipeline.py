@@ -11,7 +11,7 @@
 #   python sentiment_pipeline.py          # 采集今日数据
 #   python sentiment_pipeline.py --calibrate  # 触发重标定
 
-import sys, os, json, requests, datetime, math, socket
+import sys, os, json, requests, datetime, math, socket, time
 import requests.packages.urllib3.util.connection as urllib3_cn
 urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
 sys.stdout.reconfigure(encoding='utf-8')
@@ -83,24 +83,37 @@ def fetch_all():
         factors['sector_ad_ratio'] = round(sector_up / max(sector_down, 1), 4)
     except: pass
 
-    # 涨跌停/成交额 (从 market_daily_stats 取今日已入库数据)
+    # 涨跌停/成交额 (优先akshare实时, 兜底DB)
     try:
-        cur.execute("SELECT turnover, limit_up, limit_down FROM market_daily_stats WHERE trade_date=%s", (TODAY,))
-        r = cur.fetchone()
-        if r:
-            factors['turnover'] = float(r[0]) if r[0] else 0
-            factors['limit_up'] = int(r[1]) if r[1] else 0
-            factors['limit_down'] = int(r[2]) if r[2] else 0
+        import akshare as ak
+        today_key = TODAY.replace('-', '')
+        zt_df = ak.stock_zt_pool_em(date=today_key)
+        dt_df = ak.stock_zt_pool_dtgc_em(date=today_key)
+        if len(zt_df) > 0: factors['limit_up'] = len(zt_df)
+        if len(dt_df) > 0: factors['limit_down'] = len(dt_df)
     except: pass
+    if 'limit_up' not in factors or 'limit_down' not in factors:
+        try:
+            cur.execute("SELECT turnover, limit_up, limit_down FROM market_daily_stats WHERE trade_date=%s", (TODAY,))
+            r = cur.fetchone()
+            if r:
+                if 'limit_up' not in factors: factors['limit_up'] = int(r[1]) if r[1] else 0
+                if 'limit_down' not in factors: factors['limit_down'] = int(r[2]) if r[2] else 0
+                if 'turnover' not in factors: factors['turnover'] = float(r[0]) if r[0] else 0
+        except: pass
 
-    # 主力净流入 (push2实时)
-    try:
-        r = requests.get('https://push2.eastmoney.com/api/qt/ulist.np/get',
-            params={'fltt':2,'secids':'1.000001,0.399001','fields':'f62'},
-            headers=PUSH2_HDR, timeout=10)
-        diff = r.json().get('data',{}).get('diff',[])
-        if diff: factors['main_force_net'] = sum(d['f62'] for d in diff)
-    except: pass
+    # 主力净流入 (push2实时, 带重试)
+    for attempt in range(2):
+        try:
+            r = requests.get('https://push2.eastmoney.com/api/qt/ulist.np/get',
+                params={'fltt':2,'secids':'1.000001,0.399001','fields':'f62'},
+                headers=PUSH2_HDR, timeout=10)
+            diff = r.json().get('data',{}).get('diff',[])
+            if diff:
+                factors['main_force_net'] = sum(d['f62'] for d in diff)
+                break
+        except:
+            if attempt == 0: time.sleep(2)
 
     # 60日成交量百分位
     try:
@@ -273,50 +286,81 @@ calibrated = cur.fetchone()[0]
 
 # ── 4. 历史回填 ──────────────────────────────────────
 def backfill():
-    """从腾讯K线API拉取120天指数数据，计算复合指数，回填到 sentiment_raw_factors"""
-    indices = {'sh000001':0.3,'sz399001':0.2,'sz399006':0.1,'sh000852':0.4}
-    all_data = {}
-    for code in indices:
-        r = requests.get(f'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get',
-            params={'param':f'{code},day,,,120,qfq'}, headers=HDR, timeout=10)
-        klines = r.json().get('data',{}).get(code,{}).get('day',[])
-        prev = None
-        for k in klines:
-            d = k[0]; c = float(k[2])
-            if prev:
-                pct = (c - prev) / prev * 100
-                if d not in all_data: all_data[d] = {}
-                all_data[d][code] = pct
-            prev = c
-
-    # 计算复合指数
-    for d, vals in sorted(all_data.items()):
-        comp = sum(vals.get(c, 0) * w for c, w in indices.items())
-        sql = """INSERT INTO sentiment_raw_factors (trade_date, composite_index, create_time, update_time)
-                 VALUES (%s, %s, NOW(), NOW())
-                 ON DUPLICATE KEY UPDATE composite_index=VALUES(composite_index), update_time=NOW()"""
-        cur.execute(sql, (d, round(comp, 4)))
+    """从baostock拉取120天指数数据（全天可用，不需交易时段），计算复合指数回填"""
+    indices_map = {'sh.000001':(0.3,'sh000001'),'sz.399001':(0.2,'sz399001'),
+                   'sz.399006':(0.1,'sz399006'),'sh.000852':(0.4,'sh000852')}
+    try:
+        import baostock as bs
+        lg = bs.login()
+        if lg.error_code != '0': raise Exception(lg.error_msg)
+        all_data = {}
+        for bs_code, (wt, orig_code) in indices_map.items():
+            rs = bs.query_history_k_data_plus(bs_code,
+                "date,close", start_date="2025-12-01", end_date=TODAY,
+                frequency="d", adjustflag="2")
+            prev = None
+            while rs.next():
+                r = rs.get_row_data()
+                d, c = r[0], float(r[1]) if r[1] and r[1] != 'None' else 0
+                if prev:
+                    pct = (c - prev) / prev * 100
+                    if d not in all_data: all_data[d] = {}
+                    all_data[d][orig_code] = pct
+                prev = c
+        bs.logout()
+        for d, vals in sorted(all_data.items()):
+            comp = sum(vals.get(orig_code, 0) * wt for wt, orig_code in indices_map.values())
+            sql = """INSERT INTO sentiment_raw_factors (trade_date, composite_index, create_time, update_time)
+                     VALUES (%s, %s, NOW(), NOW())
+                     ON DUPLICATE KEY UPDATE composite_index=VALUES(composite_index), update_time=NOW()"""
+            cur.execute(sql, (d, round(comp, 4)))
+        print(f'  baostock复合指数回填: {len(all_data)}个交易日')
+    except Exception as e:
+        print(f'  baostock回填失败({e}), 改用腾讯API...')
+        indices = {'sh000001':0.3,'sz399001':0.2,'sz399006':0.1,'sh000852':0.4}
+        all_data = {}
+        for code in indices:
+            try:
+                r = requests.get('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get',
+                    params={'param':f'{code},day,,,120,qfq'}, headers=HDR, timeout=10)
+                items = r.json().get('data',{}).get(code,{}).get('day',[])
+                prev = None
+                for k in items:
+                    d, c = k[0], float(k[2])
+                    if prev:
+                        pct = (c - prev) / prev * 100
+                        if d not in all_data: all_data[d] = {}
+                        all_data[d][code] = pct
+                    prev = c
+            except: pass
+        for d, vals in sorted(all_data.items()):
+            comp = sum(vals.get(c, 0) * w for c, w in indices.items())
+            sql = """INSERT INTO sentiment_raw_factors (trade_date, composite_index, create_time, update_time)
+                     VALUES (%s, %s, NOW(), NOW())
+                     ON DUPLICATE KEY UPDATE composite_index=VALUES(composite_index), update_time=NOW()"""
+            cur.execute(sql, (d, round(comp, 4)))
 
     # 从 market_daily_stats 回填 涨跌停/成交额
-    cur.execute("SELECT trade_date, turnover, limit_up, limit_down FROM market_daily_stats")
-    for r in cur.fetchall():
-        sql = """UPDATE sentiment_raw_factors SET turnover=%s, limit_up=%s, limit_down=%s
-                 WHERE trade_date=%s"""
-        cur.execute(sql, (float(r[1] or 0), int(r[2] or 0), int(r[3] or 0), str(r[0])))
-
+    try:
+        cur.execute("SELECT trade_date, turnover, limit_up, limit_down FROM market_daily_stats")
+        for r in cur.fetchall():
+            sql = "UPDATE sentiment_raw_factors SET turnover=%s, limit_up=%s, limit_down=%s WHERE trade_date=%s"
+            cur.execute(sql, (float(r[1] or 0), int(r[2] or 0), int(r[3] or 0), str(r[0])))
+    except: pass
     # 从 market_capital_flow 回填资金流
-    cur.execute("SELECT trade_date, main_force_net FROM market_capital_flow")
-    for r in cur.fetchall():
-        sql = "UPDATE sentiment_raw_factors SET main_force_net=%s WHERE trade_date=%s"
-        cur.execute(sql, (float(r[1] or 0), str(r[0])))
-
-    # 融资融券余额回填 (akshare SSE, 近月)
+    try:
+        cur.execute("SELECT trade_date, main_force_net FROM market_capital_flow")
+        for r in cur.fetchall():
+            cur.execute("UPDATE sentiment_raw_factors SET main_force_net=%s WHERE trade_date=%s",
+                       (float(r[1] or 0), str(r[0])))
+    except: pass
+    # 融资融券余额回填 (akshare SSE)
     try:
         end_d = TODAY.replace('-','')
-        sh_margin = ak.stock_margin_sse(start_date='20260420', end_date=end_d)
+        start_d = (datetime.date.today() - datetime.timedelta(days=180)).strftime('%Y%m%d')
+        sh_margin = ak.stock_margin_sse(start_date=start_d, end_date=end_d)
         if len(sh_margin) > 0:
-            sh_col = sh_margin.columns[-1]  # 融资融券余额
-            date_col = sh_margin.columns[0]
+            sh_col = sh_margin.columns[-1]; date_col = sh_margin.columns[0]
             for _, row in sh_margin.iterrows():
                 d = str(row[date_col])[:10]
                 sh_v = float(row[sh_col]) / 1e8 if pd.notna(row[sh_col]) else 0
@@ -326,10 +370,7 @@ def backfill():
             print(f'  融资余额回填: {len(sh_margin)}条')
     except Exception as e:
         print(f'  融资余额回填跳过: {e}')
-
-    # 北向资金回填: 从 akshare stock_hsgt_fund_flow_summary_em 逐日累积 (历史数据仅限收集到的)
-    # 因 akshare 沪深港通历史数据截至2024年，最近数据需每日收集累积
-    print(f'  提示: 北向资金历史数据需每日运行 pipeline 累积，无批量回填接口')
+    print(f'  提示: 北向资金需每日运行 pipeline 累积')
 
     conn.commit()
     cur.execute("SELECT COUNT(*) FROM sentiment_raw_factors")

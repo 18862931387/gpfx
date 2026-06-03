@@ -8,7 +8,7 @@ TABLES = [
     'market_daily_stats', 'fund_history', 'market_sentiment',
     'market_capital_flow', 'sentiment_raw_factors', 'backtest_results',
     'position', 'strategy_signals', 'etf_kline', 'index_daily',
-    'market_news', 'etf_fund_flow',
+    'market_news', 'etf_fund_flow', 'sector_fund_flow',
 ]
 
 now = datetime.datetime.now()
@@ -78,19 +78,30 @@ conn.close()
 # Git
 os.chdir(OUTPUT_DIR)
 subprocess.run(['git', 'add', '-f', f'db_export_{date_str}.sql'], capture_output=True)
-
-# Remove old exports from git tracking
 for f in olds[7:]:
     subprocess.run(['git', 'rm', '--cached', os.path.basename(f)], capture_output=True)
 
 result = subprocess.run(['git', 'diff', '--cached', '--name-only'], capture_output=True, text=True)
-if result.stdout.strip():
-    msg = f'backup: DB export {date_str}'
-    subprocess.run(['git', 'commit', '-m', msg], capture_output=True)
-    push = subprocess.run(['git', 'push'], capture_output=True, text=True)
-    if push.returncode == 0:
-        print(f'Git push OK: {msg}')
-    else:
-        print(f'Git push FAIL: {push.stderr.strip()[:120]}')
-else:
+if not result.stdout.strip():
     print('No changes to commit')
+    sys.exit(0)
+
+msg = f'backup: DB export {date_str}'
+subprocess.run(['git', 'commit', '-m', msg], capture_output=True)
+
+# 检查git remote可达性再push
+try:
+    remote_check = subprocess.run(['git', 'ls-remote', '--exit-code', 'origin', 'HEAD'],
+                                   capture_output=True, text=True, timeout=15)
+    if remote_check.returncode != 0:
+        print(f'Git remote不可达(SSH key? 网络?), 备份已本地提交但未推送')
+        sys.exit(0)
+except Exception as e:
+    print(f'Git remote检查失败({e}), 备份已本地提交但未推送')
+    sys.exit(0)
+
+push = subprocess.run(['git', 'push'], capture_output=True, text=True, timeout=30)
+if push.returncode == 0:
+    print(f'Git push OK: {msg}')
+else:
+    print(f'Git push FAIL: {push.stderr.strip()[:150]}')
