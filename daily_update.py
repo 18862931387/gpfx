@@ -6,7 +6,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 import requests.packages.urllib3.util.connection as urllib3_cn
 urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
 sys.path.insert(0, os.path.dirname(__file__))
-from config import DB, TENCENT_KLINE, EASTMONEY_FUND, EASTMONEY_UT, HDR, FUND_REFERER
+from config import DB, TENCENT_KLINE, EASTMONEY_FUND, EASTMONEY_UT, HDR, FUND_REFERER, PRIMARY_FUND
 from logger import get_logger
 
 log = get_logger('daily_update')
