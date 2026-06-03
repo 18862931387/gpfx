@@ -286,6 +286,19 @@ news_score = read_sentiment_from_db()
 
 SENT, ZONE = calc_sentiment(composite, lu, ld, tv, main_force_net, margin_chg, northbound_net, news_score, db_today)
 
+# 情绪落地到 market_sentiment
+try:
+    import pymysql
+    conn_m = pymysql.connect(**DB)
+    cur_m = conn_m.cursor()
+    cur_m.execute("""INSERT INTO market_sentiment (trade_date,sentiment_value,sentiment_zone,composite_idx,create_time,update_time)
+        VALUES (%s,%s,%s,%s,NOW(),NOW())
+        ON DUPLICATE KEY UPDATE sentiment_value=VALUES(sentiment_value),sentiment_zone=VALUES(sentiment_zone),composite_idx=VALUES(composite_idx),update_time=NOW()""",
+        (TODAY, SENT, ZONE, composite))
+    conn_m.commit()
+    conn_m.close()
+except: pass
+
 # ===== a-stock-data 集成模块 =====
 
 def eastmoney_fund_flow_minute(code):
