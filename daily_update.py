@@ -131,6 +131,14 @@ tables_sql = {
         create_time DATETIME DEFAULT NOW(),
         UNIQUE KEY uk_fund_date (fund_code, trade_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
+    'northbound_flow': '''CREATE TABLE IF NOT EXISTS northbound_flow (
+        id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        trade_date DATE NOT NULL UNIQUE,
+        net_buy DECIMAL(15,2) COMMENT '当日成交净买额(亿)',
+        buy_amount DECIMAL(15,2), sell_amount DECIMAL(15,2),
+        cumulative_net DECIMAL(15,2),
+        create_time DATETIME DEFAULT NOW()
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
     'sector_fund_flow': '''CREATE TABLE IF NOT EXISTS sector_fund_flow (
         id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
         trade_date DATE NOT NULL,
@@ -397,6 +405,27 @@ for stype in ('行业资金流', '概念资金流'):
         except Exception as e:
             if attempt == 0: time.sleep(2)
             else: log.warning(f'  {stype} 采集失败: {e}')
+
+# 7. 北向资金每日采集
+try:
+    import akshare as ak
+    hsgt = ak.stock_hsgt_fund_flow_summary_em()
+    nb_val = 0.0
+    for _, row in hsgt.iterrows():
+        if '陆股' in str(row.iloc[2]) and row.iloc[5] and float(row.iloc[5]) != 0:
+            nb_val += float(row.iloc[5])
+    if nb_val != 0:
+        sql = """INSERT INTO northbound_flow (trade_date,net_buy,create_time) VALUES (%s,%s,NOW())
+        ON DUPLICATE KEY UPDATE net_buy=VALUES(net_buy)"""
+        cur.execute(sql, (date_str, round(nb_val, 2)))
+        # 同步到 sentiment_raw_factors
+        cur.execute("UPDATE sentiment_raw_factors SET northbound_net=%s WHERE trade_date=%s",
+                   (round(nb_val, 2), date_str))
+        log.info(f'  北向资金: {nb_val:+.1f}亿')
+    else:
+        log.warning(f'  北向资金: 今日为0或未更新')
+except Exception as e:
+    log.warning(f'  北向资金采集失败: {e}')
 
 conn.commit(); conn.close()
 log.info('=== Update Complete ===')

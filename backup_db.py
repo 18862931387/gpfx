@@ -8,7 +8,7 @@ TABLES = [
     'market_daily_stats', 'fund_history', 'market_sentiment',
     'market_capital_flow', 'sentiment_raw_factors', 'backtest_results',
     'position', 'strategy_signals', 'etf_kline', 'index_daily',
-    'market_news', 'etf_fund_flow', 'sector_fund_flow',
+    'market_news', 'etf_fund_flow', 'sector_fund_flow', 'northbound_flow',
 ]
 
 now = datetime.datetime.now()
