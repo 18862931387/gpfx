@@ -25,7 +25,7 @@ def get_held_fund():
         import pymysql
         conn = pymysql.connect(**DB)
         cur = conn.cursor()
-        cur.execute("SELECT fund_code,fund_name FROM position GROUP BY fund_code HAVING SUM(CASE WHEN trade_type='buy' THEN shares ELSE -shares END) > 0")
+        cur.execute("SELECT fund_code,fund_name FROM position GROUP BY fund_code,fund_name HAVING SUM(CASE WHEN trade_type='buy' THEN shares ELSE -shares END) > 0")
         r = cur.fetchone()
         conn.close()
         if r: return r[0], r[1]
@@ -49,7 +49,7 @@ def get_pos_from_db(note_filter=None):
             note_cond = "AND (note IS NULL OR NOT(" + sys_note + "))"
         else:
             note_cond = ""
-        cur.execute("SELECT fund_code,fund_name,SUM(CASE WHEN trade_type='buy' THEN shares ELSE -shares END) FROM position WHERE fund_code IS NOT NULL " + note_cond + " GROUP BY fund_code")
+        cur.execute("SELECT fund_code,fund_name,SUM(CASE WHEN trade_type='buy' THEN shares ELSE -shares END) FROM position WHERE fund_code IS NOT NULL " + note_cond + " GROUP BY fund_code,fund_name")
         r = cur.fetchone()
         shares_hold = float(r[2]) if r and r[2] else 0
         if note_filter == 'real' or note_filter is None:
@@ -148,14 +148,19 @@ try:
     conn.close()
 except: pass
 
-# 3. 大盘主力净流入 (push2实时)
+# 3. 大盘资金流向明细 (push2实时)
 main_force_net = 0.0
+large_net = super_large_net = retail_net = 0.0
 try:
     r = requests.get('https://push2.eastmoney.com/api/qt/ulist.np/get',
-        params={'fltt':2,'secids':'1.000001,0.399001','fields':'f62'},
+        params={'fltt':2,'secids':'1.000001,0.399001','fields':'f62,f66,f72,f78'},
         headers=PUSH2_HDR, timeout=10)
     diff = r.json().get('data',{}).get('diff',[])
-    if diff: main_force_net = sum(d['f62'] for d in diff)
+    if diff:
+        main_force_net = sum(d['f62'] for d in diff if d.get('f62'))
+        large_net = sum(d['f72'] for d in diff if d.get('f72'))
+        super_large_net = sum(d['f78'] for d in diff if d.get('f78'))
+        retail_net = sum(d['f66'] for d in diff if d.get('f66'))
 except: pass
 
 # 3b. 北向资金净流入 (akshare 实时)
@@ -391,10 +396,10 @@ buy_cond3 = ld > lu or tv >= 25000
 buy_cond4 = fund_flow_pos if fund_flow else True  # 无资金流数据时不阻塞信号
 buy_signal = buy_cond1 and buy_cond2 and buy_cond3 and buy_cond4
 
-sell_stop = pct <= P["stop_loss_pct"] and shares > 0
+pnl = (cur_p - entry) / entry * 100 if entry and shares > 0 else 0
+sell_stop = pnl <= P["stop_loss_pct"] and shares > 0 and entry > 0
 sell_sent = SENT >= P["sell_all_sv"] and shares > 0
 sell_half = P["sell_half_sv"] and SENT >= P["sell_half_sv"] and SENT < P["sell_all_sv"] and shares > 0
-pnl = (cur_p - entry) / entry * 100 if entry and shares > 0 else 0
 sell_tp = P["take_profit_pct"] and pnl >= P["take_profit_pct"] and shares > 0
 has_buyB = P["buyB"] and P["buyB"]["sv_min"] <= SENT <= P["buyB"]["sv_max"]
 
@@ -421,11 +426,48 @@ print(f'  成交额: {tv:.0f}亿  涨停{lu}  跌停{ld}')
 if margin_chg: print(f'  融资余额5日变化: {margin_chg:+.2f}%')
 if northbound_net: print(f'  北向资金: {northbound_net:+.1f}亿')
 if news_score: print(f'  新闻情绪: {news_score:+.2f} (-2恐慌~+2亢奋)')
+
+# 资金流向: 实时+DB历史
+if main_force_net != 0:
+    print(f'  今日资金: 主力{main_force_net/1e8:+.0f}亿  超大单{super_large_net/1e8:+.0f}亿  大单{large_net/1e8:+.0f}亿  散户{retail_net/1e8:+.0f}亿')
+try:
+    import pymysql
+    conn_tmp = pymysql.connect(**DB)
+    cur_tmp = conn_tmp.cursor()
+    cur_tmp.execute("SELECT trade_date,main_force_net/1e8,retail_net/1e8,super_large_net/1e8,main_force_pct,super_large_pct FROM market_capital_flow WHERE trade_date < CURDATE() ORDER BY trade_date DESC LIMIT 3")
+    for row in cur_tmp:
+        print(f'  历史{row[0]}: 主力{float(row[1]):+.0f}亿({row[4]}%) 散户{float(row[2]):+.0f}亿 超大单{float(row[3]):+.0f}亿({row[5]}%)')
+    conn_tmp.close()
+except: pass
 if fund_flow:
     last_f = fund_flow[-1]
     total_main = sum(r["main_net"] for r in fund_flow)
     flow_signal = '流入' if last_f['main_net'] > 0 else '流出'
     print(f'  主力资金: 尾盘{last_f["main_net"]/1e4:.0f}万{flow_signal} (全天{total_main/1e4:.0f}万)')
+
+# 资金流向落地: push2有数据时写入 market_capital_flow
+if main_force_net != 0:
+    try:
+        import pymysql
+        conn_tmp = pymysql.connect(**DB)
+        cur_tmp = conn_tmp.cursor()
+        cur_tmp.execute("""INSERT INTO market_capital_flow (trade_date,main_force_net,large_net,super_large_net,retail_net,create_time,update_time)
+            VALUES (%s,%s,%s,%s,%s,NOW(),NOW())
+            ON DUPLICATE KEY UPDATE main_force_net=VALUES(main_force_net),large_net=VALUES(large_net),super_large_net=VALUES(super_large_net),retail_net=VALUES(retail_net),update_time=NOW()""",
+            (TODAY, main_force_net, large_net, super_large_net, retail_net))
+        conn_tmp.commit()
+        conn_tmp.close()
+    except: pass
+
+# 板块资金流向 TOP3 (akshare 行业+概念)
+try:
+    import akshare as ak
+    ind = ak.stock_sector_fund_flow_rank(indicator='今日', sector_type='行业资金流').head(3)
+    for _, r in ind.iterrows():
+        mf = float(r['今日主力净流入-净额']) / 1e8
+        sl = float(r['今日超大单净流入-净额']) / 1e8
+        print(f'  行业 {r["名称"]}: {mf:+.0f}亿  超大单{sl:+.0f}亿')
+except: pass
 if hgt_val is not None:
     print(f'  北向资金: 沪+{hgt_val:.1f}亿  深+{sgt_val:.1f}亿')
 if ind_top:
@@ -465,7 +507,7 @@ if buyB_enhanced and buyB_signal:
 
 if shares > 0:
     if sell_stop:
-        print(f'  ❗ 止损! 日跌{pct:+.1f}%≤{P["stop_loss_pct"]}%')
+        print(f'  ❗ 止损! 浮亏{pnl:+.1f}%≤{P["stop_loss_pct"]}% (成本{entry:.4f})')
         print(f'  → 清仓 {shares:.0f}股 × {cur_p:.4f}')
     elif sell_sent:
         print(f'  ❗ 情绪过热({SENT:+.1f}≥{P["sell_all_sv"]})，清仓')
@@ -517,6 +559,49 @@ else:
     elif has_buyB:
         print(f'  📈 趋势信号: 情绪{SENT:+.1f}在买B范围+价在20MA上，但现金不足(需≥100)')
     print(f'  ⏳ 空仓等待 — {"; ".join(reasons)}')
+
+# ── 策略信号落地 ──
+signal_type = None
+signal_reason = ''
+if sell_stop:
+    signal_type = 'stop_loss'; signal_reason = f'浮亏{pnl:.1f}%≥{P["stop_loss_pct"]}%'
+elif sell_sent:
+    signal_type = 'sell_all'; signal_reason = f'情绪{SENT:+.1f}≥{P["sell_all_sv"]}'
+elif sell_half:
+    signal_type = 'sell_half'; signal_reason = f'情绪{SENT:+.1f}≥{P["sell_half_sv"]}'
+elif sell_tp:
+    signal_type = 'take_profit'; signal_reason = f'浮盈{pnl:.1f}%'
+elif buy_signal:
+    signal_type = 'buyA'; signal_reason = f'sv={SENT:+.1f}≤{P["buyA_sv_max"]},跌{pct:.1f}%'
+elif buyB_signal:
+    signal_type = 'buyB'; signal_reason = f'sv={SENT:+.1f}中性,价>20MA'
+if signal_type:
+    try:
+        import pymysql
+        conn_s = pymysql.connect(**DB); cur_s = conn_s.cursor()
+        cur_s.execute("INSERT INTO strategy_signals (trade_date,signal_type,sentiment_value,nav,reason,create_time) VALUES (%s,%s,%s,%s,%s,NOW()) ON DUPLICATE KEY UPDATE reason=VALUES(reason)",
+            (TODAY, signal_type, SENT, cur_p, signal_reason))
+        conn_s.commit(); conn_s.close()
+    except: pass
+
+# ── 563300 个股资金流落地 ──
+try:
+    import pymysql
+    sid = f"1.{FUND}" if FUND[0] in ('5','6','9') else f"0.{FUND}"
+    r = requests.get('https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get',
+        params={'secid': sid, 'fields1': 'f1,f2,f3,f4,f5',
+                'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
+                'lmt': '1', 'ut': UT},
+        headers=PUSH2_HDR, timeout=10)
+    klines = r.json().get('data',{}).get('klines',[])
+    if klines:
+        p = klines[0].split(',')
+        if len(p) >= 11:
+            conn_f = pymysql.connect(**DB); cur_f = conn_f.cursor()
+            cur_f.execute("INSERT INTO etf_fund_flow (trade_date,fund_code,main_force_net,retail_net,medium_net,large_net,super_large_net,create_time) VALUES (%s,%s,%s,%s,%s,%s,%s,NOW()) ON DUPLICATE KEY UPDATE main_force_net=VALUES(main_force_net),retail_net=VALUES(retail_net),medium_net=VALUES(medium_net),large_net=VALUES(large_net),super_large_net=VALUES(super_large_net)",
+                (TODAY, FUND, p[1], p[2], p[3], p[4], p[5]))
+            conn_f.commit(); conn_f.close()
+except: pass
 
 print(f'  ────────────────')
 real_asset = cash + real_shares * cur_p

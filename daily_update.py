@@ -106,6 +106,18 @@ tables_sql = {
         create_time DATETIME DEFAULT NOW(),
         KEY idx_date (trade_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
+    'etf_fund_flow': '''CREATE TABLE IF NOT EXISTS etf_fund_flow (
+        id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        trade_date DATE NOT NULL,
+        fund_code VARCHAR(10) NOT NULL,
+        main_force_net DECIMAL(20,2),
+        retail_net DECIMAL(20,2),
+        medium_net DECIMAL(20,2),
+        large_net DECIMAL(20,2),
+        super_large_net DECIMAL(20,2),
+        create_time DATETIME DEFAULT NOW(),
+        UNIQUE KEY uk_fund_date (fund_code, trade_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
 }
 for t, s in tables_sql.items():
     cur.execute(s)
@@ -256,6 +268,30 @@ for attempt in range(3):
             continue
         log.error(f'  Market Flow API unavailable (3 retries): {e}')
         break
+
+# 4b. ETF 个股资金流 (563300)
+for code in [PRIMARY_FUND] + [f[0] for f in funds]:
+    try:
+        sid = f"1.{code}" if code[0] in ('5','6','9') else f"0.{code}"
+        r = requests.get('https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get',
+            params={'secid': sid, 'fields1': 'f1,f2,f3,f4,f5',
+                    'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
+                    'lmt': '5', 'ut': EASTMONEY_UT},
+            headers={**HDR, 'Referer': 'https://data.eastmoney.com/'}, timeout=10)
+        klines = r.json().get('data',{}).get('klines',[])
+        cnt = 0
+        for k in klines:
+            p = k.split(',')
+            if len(p) >= 11:
+                sql = """INSERT INTO etf_fund_flow (trade_date,fund_code,main_force_net,retail_net,medium_net,large_net,super_large_net,create_time)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,NOW())
+                ON DUPLICATE KEY UPDATE main_force_net=VALUES(main_force_net),retail_net=VALUES(retail_net),medium_net=VALUES(medium_net),large_net=VALUES(large_net),super_large_net=VALUES(super_large_net)"""
+                cur.execute(sql, (p[0], code, p[1], p[2], p[3], p[4], p[5]))
+                cnt += 1
+        if cnt:
+            log.info(f'  {code} 个股资金流: {cnt} rows')
+    except Exception as e:
+        log.warning(f'  {code} 个股资金流: {e}')
 
 conn.commit(); conn.close()
 log.info('=== Update Complete ===')
