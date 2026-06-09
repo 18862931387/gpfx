@@ -13,13 +13,18 @@ VER = get_latest()
 P = VER["params"]
 VER_IDX = VERSIONS.index(VER) + 1
 
+# ── 情绪字段选择 ──
+USE_V5 = '--v5' in sys.argv or '-5' in sys.argv
+SENT_FIELD = 'sentiment_v5' if USE_V5 else 'sentiment_value'
+SENT_LABEL = 'v5算法' if USE_V5 else '旧算法'
+
 # ── DB: 读情绪历史 ──
 try:
     conn = pymysql.connect(**DB)
     cur = conn.cursor()
-    cur.execute("SELECT trade_date, sentiment_value FROM market_sentiment WHERE sentiment_value IS NOT NULL ORDER BY trade_date")
+    cur.execute(f"SELECT trade_date, {SENT_FIELD} FROM market_sentiment WHERE {SENT_FIELD} IS NOT NULL ORDER BY trade_date")
     db_sent = {str(r[0]): float(r[1]) for r in cur.fetchall()}
-    log.info(f'读取情绪数据 {len(db_sent)} 条')
+    log.info(f'读取情绪数据 {SENT_LABEL} {len(db_sent)} 条')
 except Exception as e:
     log.error(f'DB连接失败: {e}')
     db_sent = {}
@@ -48,6 +53,19 @@ if len(klines) < 30:
 
 pv = {k[0]: float(k[2]) for k in klines if len(k) >= 5}
 log.info(f'K线数据 {len(pv)} 条')
+
+# ── 融资余额数据 (v5.8 margin_boost用) ──
+margin_chg_5d = {}
+if P.get("buyA_margin_boost"):
+    try:
+        cur.execute("SELECT trade_date,margin_balance FROM sentiment_raw_factors WHERE margin_balance IS NOT NULL ORDER BY trade_date")
+        margins = [(str(r[0]), float(r[1])) for r in cur.fetchall()]
+        for i in range(5, len(margins)):
+            chg = (margins[i][1] - margins[i-5][1]) / margins[i-5][1] * 100
+            margin_chg_5d[margins[i][0]] = chg
+        log.info(f'融资余额数据 {len(margin_chg_5d)} 条')
+    except Exception as e:
+        log.warning(f'融资余额读取失败: {e}')
 
 MAX_INVEST = P["max_invest"]
 
@@ -125,9 +143,15 @@ def run(label, start_date, end_date):
 
         if shares == 0 and cash > 0:
             amt = min(MAX_INVEST, cash)
-            if sv <= P["buyA_sv_max"] and dc <= P["buyA_dc_min"] and amt >= 100:
+            # v5.8 margin_boost: 融资去杠杆>1%时买A阈值从-1.2放宽到-1.0
+            sv_a = P["buyA_sv_max"]
+            margin_ok = P.get("buyA_margin_boost") and margin_chg_5d.get(d, 0) < -1.0
+            if margin_ok:
+                sv_a = -1.0
+            if sv <= sv_a and dc <= P["buyA_dc_min"] and amt >= 100:
                 shares = amt / nav; cash -= amt; invested = amt
-                act = f'买A抄底(sv{sv:+.1f},跌{dc:.1f}%)'; trades += 1
+                tag = f'融资去杠杆买A' if margin_ok else '买A抄底'
+                act = f'{tag}(sv{sv:+.1f},跌{dc:.1f}%)'; trades += 1
             elif P["buyB"] and P["buyB"]["sv_min"] <= sv <= P["buyB"]["sv_max"] and m and nav > m and amt >= 100:
                 b_conf = P["buyB"]
                 # 动态仓位: 情绪越接近0仓位越大

@@ -96,6 +96,17 @@ if cur_p <= 0:
     print('ERROR: 无法获取实时行情(cur_p=0)，请检查腾讯API是否可达')
     sys.exit(1)
 
+# 成交额: 腾讯行情(全天稳定)替代push2
+try:
+    sh_tv = float(idx[37]) if len(idx) > 37 and idx[37] else 0
+    r_sz = requests.get('https://web.sqt.gtimg.cn/q=sz399001', headers=HDR, timeout=10)
+    sz_parts = r_sz.text.replace('"','').split('~')
+    sz_tv = float(sz_parts[37]) if len(sz_parts) > 37 and sz_parts[37] else 0
+    tencent_tv = round((sh_tv + sz_tv) / 10000, 0)
+    if tencent_tv > 0:
+        tv = tencent_tv
+except: pass
+
 idx_cur = float(idx[3]) if len(idx) > 3 else 0
 idx_pre = float(idx[4]) if len(idx) > 4 else 0
 idx_pct = (idx_cur - idx_pre) / idx_pre * 100 if idx_pre else 0
@@ -245,14 +256,14 @@ def calc_sentiment(composite, limit_up, limit_down, turnover, mf_net, margin_chg
         else:
             val += flow * 0.5
 
-    # 融资余额5日变化率修正
+    # 融资余额5日变化率修正 (回测最优阈值: <-1%恐慌, >+1%亢奋)
     if margin_chg:
-        if margin_chg > 1.5:
+        if margin_chg > 1.0:
             val += 0.2  # 加杠杆加速 → 情绪升温
         elif margin_chg > 0.5:
             val += 0.1
-        elif margin_chg < -1.5:
-            val -= 0.3  # 急剧去杠杆 → 恐慌
+        elif margin_chg < -1.0:
+            val -= 0.3  # 去杠杆恐慌 → 情绪降温
         elif margin_chg < -0.5:
             val -= 0.1
 
@@ -412,7 +423,13 @@ if fund_flow and len(fund_flow) >= 5:
     avg_main = sum(r["main_net"] for r in recent) / 5
     fund_flow_pos = avg_main > 0  # 尾盘5分钟主力平均净流入为正
 
-buy_cond1 = SENT <= P["buyA_sv_max"]
+# v5.8 margin_boost: 融资去杠杆>1%时放宽买A情绪阈值
+sv_threshold = P["buyA_sv_max"]
+margin_boost = P.get("buyA_margin_boost") and margin_chg < -1.0
+if margin_boost:
+    sv_threshold = -1.0
+
+buy_cond1 = SENT <= sv_threshold
 buy_cond2 = pct <= P["buyA_dc_min"]
 buy_cond3 = ld > lu or tv >= 25000
 buy_cond4 = fund_flow_pos if fund_flow else True  # 无资金流数据时不阻塞信号
@@ -445,7 +462,9 @@ print(f'  复合指数: {composite:+.2f}% ({sz_label} {cy_label} 中证2000{zz_p
 print(f'  估算情绪: {SENT:+.1f}({ZONE})')
 if ma20_val: print(f'  20日均线: {ma20_val:.4f}  现价{"↑" if above_ma20 else "↓"} ({cur_p:.4f})')
 print(f'  成交额: {tv:.0f}亿  涨停{lu}  跌停{ld}')
-if margin_chg: print(f'  融资余额5日变化: {margin_chg:+.2f}%')
+if margin_chg:
+    boost_tag = ' (buyA触发降至1.0!)' if margin_boost else ''
+    print(f'  融资余额5日变化: {margin_chg:+.2f}%{boost_tag}')
 if northbound_net: print(f'  北向资金: {northbound_net:+.1f}亿')
 if news_score: print(f'  新闻情绪: {news_score:+.2f} (-2恐慌~+2亢奋)')
 
@@ -519,7 +538,8 @@ if sys_shares>0:
     print(f'  └ 系统持仓: {sys_shares:.0f}股 @ {sys_entry:.4f}  浮盈: {sys_pnl:+.2f}%')
 
 print(f'\n  ── 条件检查 ({VER["ver"]}) ──')
-print(f'  ① 情绪≤{P["buyA_sv_max"]}: {"✅" if buy_cond1 else "❌"} ({SENT:+.1f})')
+boost_label = f'(融资去杠杆放宽到{sv_threshold})' if margin_boost else ''
+print(f'  ① 情绪≤{sv_threshold}: {"✅" if buy_cond1 else "❌"} ({SENT:+.1f}){boost_label}')
 print(f'  ② ETF跌≥{P["buyA_dc_min"]}%: {"✅" if buy_cond2 else "❌"} ({pct:+.2f}%)')
 tv_ok = tv >= 25000; ld_ok = ld > lu
 tv_label = f'成交{tv:.0f}亿≥25000' if tv_ok else f'成交{tv:.0f}亿<25000'

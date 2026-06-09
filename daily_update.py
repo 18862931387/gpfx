@@ -256,7 +256,7 @@ if zt > 0 or dt > 0 or tv_total:
     log.info(f'  Market Stats: {zt}涨停 {dt}跌停 {tv_total or "沿用旧值"}亿')
 
 # 2. Fund NAV (East Money, 只取最新净值)
-funds = [('563300','563300 CSI2000ETF'),('516330','516330 IoT ETF'),('588090','588090 STAR50 ETF')]
+funds = [('563300','563300 CSI2000ETF'),('516330','516330 IoT ETF'),('588090','588090 STAR50 ETF'),('513530','513530 HK Dividend ETF')]
 for code, name in funds:
     try:
         r = api_get(EASTMONEY_FUND, params={'fundCode': code, 'pageIndex': 1, 'pageSize': 1},
