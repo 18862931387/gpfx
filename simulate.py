@@ -9,13 +9,13 @@ from logger import get_logger
 
 log = get_logger('simulate')
 
-# 策略版本选择
+# ── 策略版本选择 ──
 VER_SEL = None
 for a in sys.argv:
     if a.startswith('--ver='):
         VER_SEL = a.split('=', 1)[1]
     elif a.startswith('-v'):
-        pass
+        pass  # handled by v5/v6 below
 VER = find(VER_SEL) if VER_SEL else get_latest()
 if not VER and VER_SEL:
     log.error(f'策略版本 {VER_SEL} 不存在')
@@ -24,7 +24,7 @@ P = VER["params"]
 VER_IDX = VERSIONS.index(VER) + 1
 log.info(f'使用策略: {VER["ver"]} | {VER["desc"]}')
 
-# 情绪字段选择
+# ── 情绪字段选择 ──
 USE_V5 = '--v5' in sys.argv or '-5' in sys.argv
 USE_V6 = '--v6' in sys.argv or '-6' in sys.argv
 if USE_V6:
@@ -37,7 +37,7 @@ else:
     SENT_FIELD = 'sentiment_value'
     SENT_LABEL = '旧算法'
 
-# DB: 读情绪历史
+# ── DB: 读情绪历史 ──
 try:
     conn = pymysql.connect(**DB)
     cur = conn.cursor()
@@ -48,7 +48,7 @@ except Exception as e:
     log.error(f'DB连接失败: {e}')
     db_sent = {}
 
-# K线: 优先读本地缓存 etf_kline
+# ── K线: 优先读本地缓存 etf_kline ──
 klines = []
 try:
     cur.execute("SELECT trade_date,open,high,low,close,volume FROM etf_kline WHERE fund_code=%s AND is_adj=1 ORDER BY trade_date", (PRIMARY_FUND,))
@@ -59,6 +59,7 @@ try:
 except Exception as e:
     log.warning(f'etf_kline 读取失败: {e}')
 
+# 缓存不足时走API
 if len(klines) < 30:
     try:
         r = requests.get(TENCENT_KLINE,
@@ -72,7 +73,7 @@ if len(klines) < 30:
 pv = {k[0]: float(k[2]) for k in klines if len(k) >= 5}
 log.info(f'K线数据 {len(pv)} 条')
 
-# 融资余额数据
+# ── 融资余额数据 (v5.8 margin_boost用) ──
 margin_chg_5d = {}
 if P.get("buyA_margin_boost"):
     try:
@@ -86,11 +87,11 @@ if P.get("buyA_margin_boost"):
         log.warning(f'融资余额读取失败: {e}')
 
 MAX_INVEST = P["max_invest"]
-BATCH = P.get("buyA_batch")
+BATCH = P.get("buyA_batch")  # v6.2+: 分批买入配置, None=单批买入
 
-# 避险股票仓位指导
+# ── v6.5 避险股票仓位指导 ──
 HAVEN_CODE = P.get("haven_code")
-haven_risk_off = {}
+haven_risk_off = {}  # date -> bool: True=避险(神华>MA), False=风险偏好
 HAVEN_MA_W = P.get("haven_ma_window", 20)
 if HAVEN_CODE:
     try:
@@ -131,7 +132,7 @@ def run(label, start_date, end_date):
 
     cash = CAPITAL; shares = 0.0; invested = 0.0; prev = None
     peak = CAPITAL; mdd = 0.0; trades = 0; sold_half = False
-    trail_hi = 0.0; batch_used = set()
+    trail_hi = 0.0; batch_used = set()  # v6.2: 已使用的分批档位
 
     print(f'\n{"="*75}')
     print(f'  {VER["ver"]} {label} | {dates[0]}~{dates[-1]} ({len(dates)}天)')
@@ -174,6 +175,7 @@ def run(label, start_date, end_date):
         if shares > 0:
             trail_hi = max(trail_hi, nav)
             trail_pnl = (nav - trail_hi) / trail_hi * 100
+            # v6.4 盈利锁定: 盈利达标后收紧回撤止损
             trail_limit = P["trailing_stop_pct"]
             if P.get("profit_lock") and pnl >= P["profit_lock"]:
                 trail_limit = P.get("lock_trailing_stop", -3.0)
@@ -193,12 +195,14 @@ def run(label, start_date, end_date):
 
         if cash > 0:
             amt = min(MAX_INVEST, cash)
+            # v6.5 避险仓位: 神华>MA→避险减仓, 神华≤MA→风险偏好加仓
             if HAVEN_CODE and d in haven_risk_off:
                 if haven_risk_off[d]:
                     amt = min(MAX_INVEST * P["haven_scale"], cash)
                 else:
                     amt = min(MAX_INVEST * P["risk_scale"], cash)
             if BATCH:
+                # ── v6.2 分批买入: 遍历档位, 未使用的档位可触发 ──
                 for bi, bt in enumerate(BATCH):
                     if bi in batch_used: continue
                     sv_a = bt["sv_max"]
@@ -207,6 +211,7 @@ def run(label, start_date, end_date):
                     if sv <= sv_a:
                         if bi == 0 and dc > P["buyA_dc_min"]: continue
                         add_amt = min(MAX_INVEST * bt["position"], cash)
+                        # v6.5 避险仓位
                         if HAVEN_CODE and d in haven_risk_off:
                             scale = P["haven_scale"] if haven_risk_off[d] else P["risk_scale"]
                             add_amt = min(MAX_INVEST * bt["position"] * scale, cash)
@@ -216,6 +221,7 @@ def run(label, start_date, end_date):
                             tag = f'融资去杠杆买{bi+1}档' if margin_ok else f'买{bi+1}档抄底'
                             act = f'{tag}(sv{sv:+.1f},跌{dc:.1f}%,{bt["position"]*100:.0f}%仓)'; break
             elif shares == 0:
+                # ── 原单批买入 v6.1 ──
                 sv_a = P["buyA_sv_max"]
                 margin_ok = P.get("buyA_margin_boost") and margin_chg_5d.get(d, 0) < -1.0
                 if margin_ok: sv_a = -1.0
@@ -226,6 +232,7 @@ def run(label, start_date, end_date):
 
             if shares == 0 and not act and P["buyB"] and P["buyB"]["sv_min"] <= sv <= P["buyB"]["sv_max"] and m and nav > m and amt >= 100:
                 b_conf = P["buyB"]
+                # 动态仓位: 情绪越接近0仓位越大
                 if "position_max" in b_conf:
                     sv_range = b_conf["sv_max"] - b_conf["sv_min"]
                     ratio = 1.0 - abs(sv) / (sv_range / 2) if sv_range > 0 else 0.5
@@ -233,15 +240,17 @@ def run(label, start_date, end_date):
                 else:
                     pos = b_conf.get("position", 1.0)
 
+                # 过滤1: 情绪动量 — 3日情绪均线上升 (v5.7+)
                 sent_mom_ok = True
                 if b_conf.get("sent_ma_days"):
                     sd = b_conf["sent_ma_days"]
                     sent_vals = [db_sent.get(dates[i - d], 0) for d in range(sd + 1) if (i - d) >= 0]
                     sent_avg = sum(sent_vals) / len(sent_vals)
-                    sent_prev = sent_vals[1:] if len(sent_vals) > 1 else sent_vals
+                    sent_prev = sent_vals[1:] if len(sent_vals) > 1 else sent_vals  # exclude today
                     sent_prev_avg = sum(sent_prev) / len(sent_prev) if sent_prev else sent_avg
-                    sent_mom_ok = sent_avg > sent_prev_avg
+                    sent_mom_ok = sent_avg > sent_prev_avg  # sentiment recovering
 
+                # 过滤2: 乖离率
                 dev_ok = True
                 if b_conf.get("ma_deviation_max"):
                     dev_ok = (nav - m) / m <= b_conf["ma_deviation_max"]
@@ -274,7 +283,7 @@ def run(label, start_date, end_date):
     log.info(f'{VER["ver"]} {label}: 收益{ret:+.2f}% 回撤{mdd:.2f}% 交易{trades}次')
     return ret, mdd, trades
 
-# 运行: 6个月回测
+# ── 运行: 6个月回测 ──
 r1, d1, t1 = run('全周期(6月)', '2025-12-01', '2026-06-01')
 r2, d2, t2 = run('12月', '2025-12-01', '2025-12-31')
 r3, d3, t3 = run('1月', '2026-01-01', '2026-01-31')
@@ -283,7 +292,7 @@ r5, d5, t5 = run('3月', '2026-03-01', '2026-03-31')
 r6, d6, t6 = run('4月', '2026-04-01', '2026-04-30')
 r7, d7, t7 = run('5月', '2026-05-01', '2026-05-31')
 
-# 写入回测结果表
+# ── 写入回测结果表 ──
 if 'conn' in dir() and results:
     try:
         create_sql = """CREATE TABLE IF NOT EXISTS backtest_results (
