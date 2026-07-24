@@ -12,15 +12,6 @@ __pycache__/
 venv/
 env/
 
-# 数据库导出
-db_export_*.sql
-
-# 敏感配置
-config.py
-
-# 数据文件
-*.csv
-
 # 操作系统
 Thumbs.db
 .DS_Store
