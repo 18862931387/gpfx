@@ -4,19 +4,38 @@ import requests.packages.urllib3.util.connection as urllib3_cn
 urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
 sys.path.insert(0, __import__('os').path.dirname(__file__))
 from config import DB, CAPITAL, TENCENT_KLINE, HDR, PRIMARY_FUND
-from strategy_config import get_latest, VERSIONS
+from strategy_config import get_latest, find, VERSIONS
 from logger import get_logger
 
 log = get_logger('simulate')
 
-VER = get_latest()
+# ── 策略版本选择 ──
+VER_SEL = None
+for a in sys.argv:
+    if a.startswith('--ver='):
+        VER_SEL = a.split('=', 1)[1]
+    elif a.startswith('-v'):
+        pass  # handled by v5/v6 below
+VER = find(VER_SEL) if VER_SEL else get_latest()
+if not VER and VER_SEL:
+    log.error(f'策略版本 {VER_SEL} 不存在')
+    sys.exit(1)
 P = VER["params"]
 VER_IDX = VERSIONS.index(VER) + 1
+log.info(f'使用策略: {VER["ver"]} | {VER["desc"]}')
 
 # ── 情绪字段选择 ──
 USE_V5 = '--v5' in sys.argv or '-5' in sys.argv
-SENT_FIELD = 'sentiment_v5' if USE_V5 else 'sentiment_value'
-SENT_LABEL = 'v5算法' if USE_V5 else '旧算法'
+USE_V6 = '--v6' in sys.argv or '-6' in sys.argv
+if USE_V6:
+    SENT_FIELD = 'sentiment_v6'
+    SENT_LABEL = 'v6算法(K-means聚类)'
+elif USE_V5:
+    SENT_FIELD = 'sentiment_v5'
+    SENT_LABEL = 'v5算法'
+else:
+    SENT_FIELD = 'sentiment_value'
+    SENT_LABEL = '旧算法'
 
 # ── DB: 读情绪历史 ──
 try:
@@ -68,6 +87,28 @@ if P.get("buyA_margin_boost"):
         log.warning(f'融资余额读取失败: {e}')
 
 MAX_INVEST = P["max_invest"]
+BATCH = P.get("buyA_batch")  # v6.2+: 分批买入配置, None=单批买入
+
+# ── v6.5 避险股票仓位指导 ──
+HAVEN_CODE = P.get("haven_code")
+haven_risk_off = {}  # date -> bool: True=避险(神华>MA), False=风险偏好
+HAVEN_MA_W = P.get("haven_ma_window", 20)
+if HAVEN_CODE:
+    try:
+        if HAVEN_CODE == '600900':
+            cur.execute("SELECT trade_date, close FROM cjdl_kline ORDER BY trade_date")
+        else:
+            cur.execute("SELECT trade_date, close FROM haven_kline WHERE code=%s ORDER BY trade_date", (HAVEN_CODE,))
+        rows = cur.fetchall()
+        haven_pv = {str(r[0]): float(r[1]) for r in rows}
+        haven_dates = sorted(haven_pv.keys())
+        for i in range(HAVEN_MA_W, len(haven_dates)):
+            seg = [haven_pv[haven_dates[j]] for j in range(i-HAVEN_MA_W, i)]
+            ma = sum(seg) / HAVEN_MA_W
+            haven_risk_off[haven_dates[i]] = haven_pv[haven_dates[i]] > ma
+        log.info(f'避险股 {P.get("haven_name", HAVEN_CODE)} MA{HAVEN_MA_W} 数据 {len(haven_pv)} 条, 避险信号 {sum(haven_risk_off.values())}天')
+    except Exception as e:
+        log.warning(f'避险股数据读取失败: {e}')
 
 def ma20(dates, idx):
     if idx < 20: return None
@@ -91,7 +132,7 @@ def run(label, start_date, end_date):
 
     cash = CAPITAL; shares = 0.0; invested = 0.0; prev = None
     peak = CAPITAL; mdd = 0.0; trades = 0; sold_half = False
-    trail_hi = 0.0
+    trail_hi = 0.0; batch_used = set()  # v6.2: 已使用的分批档位
 
     print(f'\n{"="*75}')
     print(f'  {VER["ver"]} {label} | {dates[0]}~{dates[-1]} ({len(dates)}天)')
@@ -107,11 +148,17 @@ def run(label, start_date, end_date):
         b_desc = ''
         pos = 1.0
     print(f'  买A:情绪≤{P["buyA_sv_max"]}&跌≥{P["buyA_dc_min"]}% {b_desc}')
+    if BATCH:
+        batch_desc = ' | '.join([f'{t["sv_max"]:+.1f}→{t["position"]*100:.0f}%' for t in BATCH])
+        print(f'  分批: {batch_desc}')
     print(f'  卖:≥{P["sell_all_sv"]}清仓', end='')
     if P["sell_half_sv"]: print(f'  {P["sell_half_sv"]}~{P["sell_all_sv"]}卖一半', end='')
     print(f' | 止损{P["stop_loss_pct"]}%', end='')
     if P["trailing_stop_pct"]: print(f' 回撤{P["trailing_stop_pct"]}%', end='')
+    if P.get("profit_lock"): print(f' 盈利≥{P["profit_lock"]}%锁{P.get("lock_trailing_stop",-3.0)}%', end='')
     if P["take_profit_pct"]: print(f' 止盈+{P["take_profit_pct"]}%', end='')
+    if HAVEN_CODE and haven_risk_off:
+        print(f' | {P.get("haven_name",HAVEN_CODE)}>MA{HAVEN_MA_W}:{P["haven_scale"]*100:.0f}%仓 ≤MA{HAVEN_MA_W}:{P["risk_scale"]*100:.0f}%仓', end='')
     print()
     print(f'{"="*75}')
     print(f'{"日期":12} {"情绪":>5} {"净值":>7} {"日跌":>6} {"操作":<28} {"市值":>7} {"现金":>7} {"总资产":>7}')
@@ -128,31 +175,62 @@ def run(label, start_date, end_date):
         if shares > 0:
             trail_hi = max(trail_hi, nav)
             trail_pnl = (nav - trail_hi) / trail_hi * 100
+            # v6.4 盈利锁定: 盈利达标后收紧回撤止损
+            trail_limit = P["trailing_stop_pct"]
+            if P.get("profit_lock") and pnl >= P["profit_lock"]:
+                trail_limit = P.get("lock_trailing_stop", -3.0)
             if sv >= P["sell_all_sv"]:
-                cash += pv2; act = f'清仓(情绪{sv:+.1f}≥{P["sell_all_sv"]})'; shares = 0; invested = 0; trades += 1; trail_hi = 0
+                cash += pv2; act = f'清仓(情绪{sv:+.1f}≥{P["sell_all_sv"]})'; shares = 0; invested = 0; trades += 1; trail_hi = 0; batch_used = set()
             elif P["sell_half_sv"] and sv >= P["sell_half_sv"] and not sold_half:
                 half_v = pv2 * 0.5; cash += half_v; shares *= 0.5; invested *= 0.5
                 act = f'卖一半(情绪{sv:+.1f}≥{P["sell_half_sv"]})'; trades += 1; sold_half = True
-            elif P["trailing_stop_pct"] and trail_pnl <= P["trailing_stop_pct"]:
-                cash += pv2; act = f'回撤止损(从峰值{trail_pnl:.1f}%)'; shares = 0; invested = 0; trades += 1; trail_hi = 0
+            elif P["trailing_stop_pct"] and trail_pnl <= trail_limit:
+                lock_tag = '(盈利锁定)' if trail_limit != P["trailing_stop_pct"] else ''
+                cash += pv2; act = f'回撤止损{lock_tag}(从峰值{trail_pnl:.1f}%)'; shares = 0; invested = 0; trades += 1; trail_hi = 0; batch_used = set()
             elif pnl <= P["stop_loss_pct"]:
-                cash += pv2; act = f'止损({pnl:.1f}%)'; shares = 0; invested = 0; trades += 1; trail_hi = 0
+                cash += pv2; act = f'止损({pnl:.1f}%)'; shares = 0; invested = 0; trades += 1; trail_hi = 0; batch_used = set()
             elif P["take_profit_pct"] and pnl >= P["take_profit_pct"] and not sold_half:
                 half_v = pv2 * 0.5; cash += half_v; shares -= half_v / nav; invested *= 0.5
                 act = f'止盈一半(+{pnl:.1f}%)'; trades += 1; sold_half = True
 
-        if shares == 0 and cash > 0:
+        if cash > 0:
             amt = min(MAX_INVEST, cash)
-            # v5.8 margin_boost: 融资去杠杆>1%时买A阈值从-1.2放宽到-1.0
-            sv_a = P["buyA_sv_max"]
-            margin_ok = P.get("buyA_margin_boost") and margin_chg_5d.get(d, 0) < -1.0
-            if margin_ok:
-                sv_a = -1.0
-            if sv <= sv_a and dc <= P["buyA_dc_min"] and amt >= 100:
-                shares = amt / nav; cash -= amt; invested = amt
-                tag = f'融资去杠杆买A' if margin_ok else '买A抄底'
-                act = f'{tag}(sv{sv:+.1f},跌{dc:.1f}%)'; trades += 1
-            elif P["buyB"] and P["buyB"]["sv_min"] <= sv <= P["buyB"]["sv_max"] and m and nav > m and amt >= 100:
+            # v6.5 避险仓位: 神华>MA→避险减仓, 神华≤MA→风险偏好加仓
+            if HAVEN_CODE and d in haven_risk_off:
+                if haven_risk_off[d]:
+                    amt = min(MAX_INVEST * P["haven_scale"], cash)
+                else:
+                    amt = min(MAX_INVEST * P["risk_scale"], cash)
+            if BATCH:
+                # ── v6.2 分批买入: 遍历档位, 未使用的档位可触发 ──
+                for bi, bt in enumerate(BATCH):
+                    if bi in batch_used: continue
+                    sv_a = bt["sv_max"]
+                    margin_ok = P.get("buyA_margin_boost") and bi == 0 and margin_chg_5d.get(d, 0) < -1.0
+                    if margin_ok: sv_a = -1.0
+                    if sv <= sv_a:
+                        if bi == 0 and dc > P["buyA_dc_min"]: continue
+                        add_amt = min(MAX_INVEST * bt["position"], cash)
+                        # v6.5 避险仓位
+                        if HAVEN_CODE and d in haven_risk_off:
+                            scale = P["haven_scale"] if haven_risk_off[d] else P["risk_scale"]
+                            add_amt = min(MAX_INVEST * bt["position"] * scale, cash)
+                        if add_amt >= 100:
+                            shares += add_amt / nav; cash -= add_amt; invested += add_amt
+                            batch_used.add(bi); trades += 1
+                            tag = f'融资去杠杆买{bi+1}档' if margin_ok else f'买{bi+1}档抄底'
+                            act = f'{tag}(sv{sv:+.1f},跌{dc:.1f}%,{bt["position"]*100:.0f}%仓)'; break
+            elif shares == 0:
+                # ── 原单批买入 v6.1 ──
+                sv_a = P["buyA_sv_max"]
+                margin_ok = P.get("buyA_margin_boost") and margin_chg_5d.get(d, 0) < -1.0
+                if margin_ok: sv_a = -1.0
+                if sv <= sv_a and dc <= P["buyA_dc_min"] and amt >= 100:
+                    shares = amt / nav; cash -= amt; invested = amt
+                    tag = f'融资去杠杆买A' if margin_ok else '买A抄底'
+                    act = f'{tag}(sv{sv:+.1f},跌{dc:.1f}%)'; trades += 1
+
+            if shares == 0 and not act and P["buyB"] and P["buyB"]["sv_min"] <= sv <= P["buyB"]["sv_max"] and m and nav > m and amt >= 100:
                 b_conf = P["buyB"]
                 # 动态仓位: 情绪越接近0仓位越大
                 if "position_max" in b_conf:
@@ -188,7 +266,7 @@ def run(label, start_date, end_date):
                 else:
                     blocks = []
                     if not sent_mom_ok: blocks.append('情绪均线未升')
-                    if not dev_ok: blocks.append(f'乖离过大({(nav-m)/m*100:+.1f}%)')
+                    if not dev_ok: blocks.append(f'乖离过大({(nav-m)/m*100:.1f}%)')
 
         pv2 = shares * nav; tot = cash + pv2
         if tot > peak: peak = tot
