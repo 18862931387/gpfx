@@ -91,50 +91,38 @@ def calibrate_v6():
         for r in raw
     ])
 
-    # ── 特征工程 ──
-    # 1. 板块涨跌比 → log
+    # 特征工程
     ad_ratio = np.clip(X_raw[:, 0], 0.01, 100)
     log_ad = np.log(ad_ratio)
-
-    # 2. 成交量百分位
     vol_pct = X_raw[:, 1]
-
-    # 3. 主力净流入
     flow = X_raw[:, 2]
-
-    # 4. 融资余额 5日变化率
     margin = np.array([r4 or 0 for r4 in X_raw[:, 3]])
     margin_chg = np.zeros_like(margin)
     for i in range(5, len(margin)):
         if margin[i - 5] and margin[i - 5] != 0:
             margin_chg[i] = (margin[i] - margin[i - 5]) / abs(margin[i - 5]) * 100
 
-    # ── 纯市场指标聚类 (4因子, 不含composite, 避免循环论证) ──
-    # composite_index 仅在聚类后用于回归映射，不参与聚类
+    # 纯市场指标聚类 (4因子, 不含composite, 避免循环论证)
     all_features = np.column_stack([log_ad, vol_pct, flow, margin_chg])
     feature_names = ['log_ad', 'vol_pct', 'flow', 'margin_chg']
 
-    # Z-score 标准化
     means = np.mean(all_features, axis=0)
     stds = np.std(all_features, axis=0)
-    stds = np.where(stds < 1e-10, 1.0, stds)  # 防止除零
+    stds = np.where(stds < 1e-10, 1.0, stds)
     X_std = (all_features - means) / stds
 
     print(f'  聚类特征矩阵: {X_std.shape} (样本×4特征, 全部z-score标准化)')
     var_info = ', '.join([f'{feature_names[i]}={np.var(X_std[:,i]):.2f}' for i in range(4)])
     print(f'  标准化后方差: {var_info}')
 
-    # ── K-means 聚类 (4纯市场因子, 全部标准化等权) ──
     labels, centroids = kmeans(X_std, k=5, n_init=20)
 
-    # 按各簇的平均复合指数排序, 映射到 -2 ~ +2
     cluster_composite = np.array([composites[labels == i].mean() for i in range(5)])
     cluster_order = np.argsort(cluster_composite)
     mapping = {int(cluster_order[i]): float(i - 2) for i in range(5)}
 
     sentiment_labels = np.array([mapping[int(l)] for l in labels])
 
-    # ── 打印聚类结果 ──
     print(f'\n{"=" * 70}')
     print(f'  V6 K-means 聚类结果 ({len(raw)}条, k=5, 4纯市场因子z-score标准化, 20次初始化)')
     print(f'  (v5对比: 强制均分20%每档, 复合指数占35%权重)')
@@ -154,7 +142,6 @@ def calibrate_v6():
               f'ad:{c[0]:+.2f} vol:{c[1]:+.2f} '
               f'flow:{c[2]:+.2f} mar:{c[3]:+.2f}')
 
-    # 检查聚类质量: 每个簇的 composite 范围
     print(f'\n  各簇 composite 分布:')
     for i in range(5):
         orig_i = int(cluster_order[i])
@@ -164,7 +151,6 @@ def calibrate_v6():
         print(f'    情绪{sent:+.0f}: min={cluster_vals.min():+.2f}%  '
               f'median={np.median(cluster_vals):+.2f}%  max={cluster_vals.max():+.2f}%')
 
-    # ── 回归: sentiment_label = β₀ + β₁ × composite ──
     X_design = np.column_stack([np.ones(len(composites)), composites])
     beta = np.linalg.lstsq(X_design, sentiment_labels, rcond=None)[0]
     b0, b1 = float(beta[0]), float(beta[1])
@@ -179,7 +165,6 @@ def calibrate_v6():
     print(f'  (v5: 0.3461 + 0.8168 × composite, R²=0.92 [循环论证虚高])')
     print(f'  {"=" * 55}')
 
-    # 对比 v5 vs v6 标签
     old_b0, old_b1 = 0.3461, 0.8168
     diffs = []
     for i in range(len(composites)):
@@ -196,7 +181,6 @@ def calibrate_v6():
 
 
 def generate_v6_history(result):
-    """用 v6 系数 + 各修正项, 为 market_sentiment 历史数据生成 sentiment_v6"""
     if result is None:
         print('标定失败, 无法生成历史')
         return
@@ -206,7 +190,6 @@ def generate_v6_history(result):
     conn = pymysql.connect(**DB)
     cur = conn.cursor()
 
-    # 确保 sentiment_v6 列存在
     try:
         cur.execute("ALTER TABLE market_sentiment ADD COLUMN sentiment_v6 DECIMAL(5,2)")
         conn.commit()
@@ -214,7 +197,6 @@ def generate_v6_history(result):
     except:
         pass
 
-    # 读取所有 market_sentiment 记录
     cur.execute("SELECT trade_date, composite_idx, sentiment_value FROM market_sentiment ORDER BY trade_date")
     rows = cur.fetchall()
     print(f'  读取 market_sentiment: {len(rows)} 条')
@@ -223,7 +205,6 @@ def generate_v6_history(result):
     for trade_date, composite, old_sv in rows:
         if composite is None:
             continue
-        # v6 基础分 = 新回归系数 × composite
         v6_val = b0 + b1 * float(composite)
         v6_val = round(max(-2.5, min(2.5, v6_val)), 2)
         cur.execute(
@@ -239,12 +220,10 @@ def generate_v6_history(result):
 
 
 def backfill_v6():
-    """仅回填: 读取已有标定系数, 重新计算 v6 历史"""
     conn = pymysql.connect(**DB)
     cur = conn.cursor()
 
-    # 尝试从 sentiment_v6_config 表读取系数
-    b0, b1 = 0.0, 0.8  # 默认
+    b0, b1 = 0.0, 0.8
     try:
         cur.execute("SELECT b0, b1 FROM sentiment_v6_config ORDER BY id DESC LIMIT 1")
         r = cur.fetchone()
@@ -254,7 +233,6 @@ def backfill_v6():
     except:
         print('  无已保存系数, 使用默认值')
 
-    # 确保列存在
     try:
         cur.execute("ALTER TABLE market_sentiment ADD COLUMN sentiment_v6 DECIMAL(5,2)")
         conn.commit()
@@ -280,7 +258,6 @@ def backfill_v6():
 
 
 def save_config(result):
-    """保存 v6 标定结果到配置表"""
     if result is None:
         return
     conn = pymysql.connect(**DB)
@@ -303,7 +280,6 @@ def save_config(result):
     print(f'  标定结果已保存到 sentiment_v6_config')
 
 
-# ── CLI ──
 if __name__ == '__main__':
     print(f'V6 情绪标定 | {TODAY}')
     print('=' * 65)

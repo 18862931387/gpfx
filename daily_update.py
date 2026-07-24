@@ -55,8 +55,8 @@ tables_sql = {
     'market_sentiment': '''CREATE TABLE IF NOT EXISTS market_sentiment (
         id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
         trade_date DATE NOT NULL, sentiment_value DECIMAL(5,2), sentiment_zone VARCHAR(10),
-        composite_idx DECIMAL(6,4) COMMENT 'original 4-index composite',
-        calibrated TINYINT(1) DEFAULT 0 COMMENT '0=calc_sentiment, 1=regression',
+        composite_idx DECIMAL(6,4),
+        calibrated TINYINT(1) DEFAULT 0,
         market_desc TEXT,
         week_day VARCHAR(10), holiday_note VARCHAR(50),
         create_time DATETIME, update_time DATETIME,
@@ -65,21 +65,21 @@ tables_sql = {
     'strategy_signals': '''CREATE TABLE IF NOT EXISTS strategy_signals (
         id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
         trade_date DATE NOT NULL,
-        signal_type VARCHAR(10) NOT NULL COMMENT 'buyA/buyB/sell_all/stop_loss/stop_ma/sell_half',
+        signal_type VARCHAR(10) NOT NULL,
         sentiment_value DECIMAL(5,2),
         nav DECIMAL(10,4),
         reason VARCHAR(200),
-        executed TINYINT(1) DEFAULT 0 COMMENT '0=signal only, 1=executed',
+        executed TINYINT(1) DEFAULT 0,
         create_time DATETIME DEFAULT NOW(),
         UNIQUE KEY uk_date_type (trade_date, signal_type)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
     'market_capital_flow': '''CREATE TABLE IF NOT EXISTS market_capital_flow (
         trade_date DATE PRIMARY KEY,
-        main_force_net DECIMAL(15,2) COMMENT 'main force net(yuan)',
-        retail_net DECIMAL(15,2) COMMENT 'retail net(yuan)',
-        medium_net DECIMAL(15,2) COMMENT 'medium order net(yuan)',
-        large_net DECIMAL(15,2) COMMENT 'large order net(yuan)',
-        super_large_net DECIMAL(15,2) COMMENT 'super large order net(yuan)',
+        main_force_net DECIMAL(15,2),
+        retail_net DECIMAL(15,2),
+        medium_net DECIMAL(15,2),
+        large_net DECIMAL(15,2),
+        super_large_net DECIMAL(15,2),
         main_force_pct DECIMAL(5,2), retail_pct DECIMAL(5,2),
         medium_pct DECIMAL(5,2), large_pct DECIMAL(5,2), super_large_pct DECIMAL(5,2),
         create_time DATETIME DEFAULT NOW(), update_time DATETIME DEFAULT NOW()
@@ -93,17 +93,17 @@ tables_sql = {
         low DECIMAL(10,4),
         close DECIMAL(10,4),
         volume DECIMAL(20,2),
-        is_adj TINYINT(1) DEFAULT 1 COMMENT '1=前复权',
+        is_adj TINYINT(1) DEFAULT 1,
         create_time DATETIME DEFAULT NOW(),
         UNIQUE KEY uk_fund_date (fund_code, trade_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
     'index_daily': '''CREATE TABLE IF NOT EXISTS index_daily (
         id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
         trade_date DATE NOT NULL,
-        sh_pct DECIMAL(6,2) COMMENT 'sh index %',
-        sz_pct DECIMAL(6,2) COMMENT 'sz index %',
-        cy_pct DECIMAL(6,2) COMMENT 'chinext %',
-        zz2000_pct DECIMAL(6,2) COMMENT 'csi2000 %',
+        sh_pct DECIMAL(6,2),
+        sz_pct DECIMAL(6,2),
+        cy_pct DECIMAL(6,2),
+        zz2000_pct DECIMAL(6,2),
         create_time DATETIME DEFAULT NOW(),
         UNIQUE KEY uk_date (trade_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
@@ -134,7 +134,7 @@ tables_sql = {
     'northbound_flow': '''CREATE TABLE IF NOT EXISTS northbound_flow (
         id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
         trade_date DATE NOT NULL UNIQUE,
-        net_buy DECIMAL(15,2) COMMENT '当日成交净买额(亿)',
+        net_buy DECIMAL(15,2),
         buy_amount DECIMAL(15,2), sell_amount DECIMAL(15,2),
         cumulative_net DECIMAL(15,2),
         create_time DATETIME DEFAULT NOW()
@@ -143,12 +143,12 @@ tables_sql = {
         id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
         trade_date DATE NOT NULL,
         sector_name VARCHAR(50) NOT NULL,
-        sector_type VARCHAR(20) COMMENT '行业资金流/概念资金流',
-        main_force_net DECIMAL(20,2) COMMENT '主力净流入',
-        super_large_net DECIMAL(20,2) COMMENT '超大单净流入',
-        large_net DECIMAL(20,2) COMMENT '大单净流入',
-        medium_net DECIMAL(20,2) COMMENT '中单净流入',
-        retail_net DECIMAL(20,2) COMMENT '散户净流入',
+        sector_type VARCHAR(20),
+        main_force_net DECIMAL(20,2),
+        super_large_net DECIMAL(20,2),
+        large_net DECIMAL(20,2),
+        medium_net DECIMAL(20,2),
+        retail_net DECIMAL(20,2),
         create_time DATETIME DEFAULT NOW(),
         KEY idx_date (trade_date),
         UNIQUE KEY uk_sector_date (sector_name, sector_type, trade_date)
@@ -159,7 +159,7 @@ for t, s in tables_sql.items():
 
 log.info(f'=== Data Update {date_str} ===')
 
-# 1. Index K-line (Tencent + baostock 双重保障)
+# 1. Index K-line
 indices_api = {
     'sh000001': ('SH Index', 'sh.000001'),
     'sz399001': ('SZ Component', 'sz.399001'),
@@ -196,7 +196,7 @@ for code, (name, bs_code) in indices_api.items():
                     log.info(f'  {name}: baostock兜底 {rows[-1][0]} close={rows[-1][1]}')
         except: pass
 
-# 1b. Index daily % backup (write to index_daily for _afternoon_check fallback)
+# 1b. Index daily % backup
 try:
     idx_pcts = {}
     idx_map = {'sh000001': 'sh_pct', 'sz399001': 'sz_pct', 'sz399006': 'cy_pct', 'sh000852': 'zz2000_pct'}
@@ -215,7 +215,7 @@ try:
 except Exception as e:
     log.warning(f'  Index daily backup 写入失败: {e}')
 
-# 1c. Market daily stats (limit_up/down + turnover)
+# 1c. Market daily stats
 zt, dt = 0, 0
 try:
     import akshare as ak
@@ -226,7 +226,6 @@ try:
     log.info(f'  akshare涨停跌停: {zt}涨停 {dt}跌停')
 except Exception as e:
     log.warning(f'  akshare涨停跌停失败: {e}')
-# 成交额: 上证+深证 (push2)
 tv_total = None
 try:
     clist_headers = {**HDR, 'Referer': 'https://quote.eastmoney.com/'}
@@ -255,7 +254,7 @@ if zt > 0 or dt > 0 or tv_total:
         cur.execute(sql, (date_str, zt, dt))
     log.info(f'  Market Stats: {zt}涨停 {dt}跌停 {tv_total or "沿用旧值"}亿')
 
-# 2. Fund NAV (East Money, 只取最新净值)
+# 2. Fund NAV
 funds = [('510300','510300 CSI300ETF'),('516330','516330 IoT ETF'),('588090','588090 STAR50 ETF'),('513530','513530 HK Dividend ETF')]
 for code, name in funds:
     try:
@@ -277,11 +276,10 @@ for code, name in funds:
     except Exception as e:
         log.warning(f'  {name}: NAV获取失败 {e}')
 
-# 3. ETF K-line cache (Tencent + baostock 双重保障, 60日前复权)
+# 3. ETF K-line cache
 etf_kline_count = 0
 for code, name in funds:
     klines = []
-    # 优先腾讯
     try:
         r = api_get(TENCENT_KLINE,
             params={'param': f'sh{code},day,,,60,qfq'}, headers=HDR, timeout=10)
@@ -289,7 +287,6 @@ for code, name in funds:
             data = r.json().get('data', {}).get(f'sh{code}', {})
             klines = data.get('qfqday', data.get('day', []))
     except: pass
-    # 腾讯失败 → baostock 兜底
     if not klines:
         try:
             import baostock as bs
@@ -322,7 +319,7 @@ for code, name in funds:
 if etf_kline_count:
     log.info(f'  ETF K-line: {etf_kline_count} rows total')
 
-# 4. Market capital flow (East Money push2his)
+# 4. Market capital flow
 flow_ok = False
 for attempt in range(3):
     try:
@@ -354,7 +351,7 @@ for attempt in range(3):
         log.error(f'  Market Flow API unavailable (3 retries): {e}')
         break
 
-# 4b. ETF 个股资金流 (510300)
+# 4b. ETF 个股资金流
 for code in [PRIMARY_FUND] + [f[0] for f in funds]:
     try:
         sid = f"1.{code}" if code[0] in ('5','6','9') else f"0.{code}"
@@ -379,7 +376,7 @@ for code in [PRIMARY_FUND] + [f[0] for f in funds]:
     except Exception as e:
         log.warning(f'  {code} 个股资金流: {e}')
 
-# 6. 板块资金流向 (akshare 行业+概念)
+# 6. 板块资金流向
 for stype in ('行业资金流', '概念资金流'):
     for attempt in range(2):
         try:
@@ -418,7 +415,6 @@ try:
         sql = """INSERT INTO northbound_flow (trade_date,net_buy,create_time) VALUES (%s,%s,NOW())
         ON DUPLICATE KEY UPDATE net_buy=VALUES(net_buy)"""
         cur.execute(sql, (date_str, round(nb_val, 2)))
-        # 同步到 sentiment_raw_factors
         cur.execute("UPDATE sentiment_raw_factors SET northbound_net=%s WHERE trade_date=%s",
                    (round(nb_val, 2), date_str))
         log.info(f'  北向资金: {nb_val:+.1f}亿')
@@ -432,7 +428,7 @@ log.info('=== Update Complete ===')
 if not flow_ok:
     log.warning('  (Market flow data was not updated - API will retry on next run)')
 
-# 5. News sentiment (Sina feed, 带重试)
+# 5. News sentiment
 for _ in range(2):
     try:
         from news_sentiment import save_to_db, fetch_news
