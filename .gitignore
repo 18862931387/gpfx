@@ -12,8 +12,6 @@ __pycache__/
 venv/
 env/
 
-# 数据库导出
-
 # 操作系统
 Thumbs.db
 .DS_Store

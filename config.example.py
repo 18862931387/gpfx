@@ -1,9 +1,11 @@
-# 项目统一配置
+# 项目统一配置（模板）
+# 复制为 config.py 并填入真实值
+
 DB = {
-    'host': '192.168.3.68',
+    'host': 'your_host',
     'port': 3306,
-    'user': 'root',
-    'password': 'root123',
+    'user': 'your_user',
+    'password': 'your_password',
     'database': 'data_analysis',
     'charset': 'utf8mb4',
 }
@@ -17,7 +19,7 @@ TENCENT_KLINE = 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get'
 EASTMONEY_PUSH2 = 'https://push2.eastmoney.com/api/qt/{endpoint}'
 EASTMONEY_PUSH2HIS = 'https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get'
 EASTMONEY_FUND = 'https://api.fund.eastmoney.com/f10/lsjz'
-EASTMONEY_UT = 'b2884a393a59ad64002292a3e90d46a5'
+EASTMONEY_UT = 'your_eastmoney_token'
 HEXIN_HSGT = 'https://data.hexin.cn/market/hsgtApi/method/dayChart/'
 
 # 默认请求头
