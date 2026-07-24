@@ -256,7 +256,7 @@ if zt > 0 or dt > 0 or tv_total:
     log.info(f'  Market Stats: {zt}涨停 {dt}跌停 {tv_total or "沿用旧值"}亿')
 
 # 2. Fund NAV (East Money, 只取最新净值)
-funds = [('563300','563300 CSI2000ETF'),('516330','516330 IoT ETF'),('588090','588090 STAR50 ETF'),('513530','513530 HK Dividend ETF')]
+funds = [('510300','510300 CSI300ETF'),('516330','516330 IoT ETF'),('588090','588090 STAR50 ETF'),('513530','513530 HK Dividend ETF')]
 for code, name in funds:
     try:
         r = api_get(EASTMONEY_FUND, params={'fundCode': code, 'pageIndex': 1, 'pageSize': 1},
@@ -354,7 +354,7 @@ for attempt in range(3):
         log.error(f'  Market Flow API unavailable (3 retries): {e}')
         break
 
-# 4b. ETF 个股资金流 (563300)
+# 4b. ETF 个股资金流 (510300)
 for code in [PRIMARY_FUND] + [f[0] for f in funds]:
     try:
         sid = f"1.{code}" if code[0] in ('5','6','9') else f"0.{code}"

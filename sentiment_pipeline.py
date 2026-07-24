@@ -40,13 +40,12 @@ cur.execute("""CREATE TABLE IF NOT EXISTS sentiment_raw_factors (
     main_force_net DECIMAL(15,2) COMMENT '主力净流入(万)',
     volume_pctile_60d DECIMAL(5,2) COMMENT '60日成交量百分位',
     margin_balance DECIMAL(20,2) COMMENT '融资融券余额(亿)',
-    northbound_net DECIMAL(15,2) COMMENT '北向资金净流入(亿)',
     sentiment_label DECIMAL(5,2) COMMENT '聚类标签',
     create_time DATETIME DEFAULT NOW(), update_time DATETIME DEFAULT NOW()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
 conn.commit()
 # 新增字段兼容
-for col, typ in [('margin_balance','DECIMAL(20,2)'), ('northbound_net','DECIMAL(15,2)')]:
+for col, typ in [('margin_balance','DECIMAL(20,2)')]:
     try:
         cur.execute(f"ALTER TABLE sentiment_raw_factors ADD COLUMN {col} {typ}")
         conn.commit()
@@ -146,19 +145,6 @@ def fetch_all():
                 factors['margin_balance'] = round(sh_val + sz_val, 2)
     except: pass
 
-    # 北向资金净流入 (akshare 沪深港通实时汇总)
-    try:
-        hsgt = ak.stock_hsgt_fund_flow_summary_em()
-        if len(hsgt) > 0:
-            type_col = hsgt.columns[2]  # 类型列
-            net_col = hsgt.columns[5]   # 当日成交净买额
-            # 筛选 陆股通(沪) + 陆股通(深) 行
-            nb_mask = hsgt[type_col].astype(str).str.contains('陆股', na=False)
-            nb_vals = hsgt.loc[nb_mask, net_col].dropna()
-            if len(nb_vals) > 0 and nb_vals.abs().sum() > 0:
-                factors['northbound_net'] = round(float(nb_vals.sum()), 2)
-    except: pass
-
     return factors
 
 
@@ -176,7 +162,7 @@ conn.commit()
 # ── 2. 标定（--calibrate 或 数据量>=30时自动触发） ───────
 def run_calibrate():
     cur.execute("SELECT trade_date, composite_index, sector_ad_ratio, volume_pctile_60d, main_force_net, "
-                "margin_balance, northbound_net "
+                "margin_balance "
                 "FROM sentiment_raw_factors WHERE composite_index IS NOT NULL "
                 "ORDER BY trade_date")
     raw = cur.fetchall()
@@ -188,7 +174,7 @@ def run_calibrate():
 
     dates = [r[0] for r in raw]
     X_raw = np.array([[float(r[1] or 0), float(r[2] or 1), float(r[3] or 50), float(r[4] or 0),
-                       float(r[5] or 0), float(r[6] or 0)] for r in raw])
+                       float(r[5] or 0)] for r in raw])
 
     # 特征工程
     ad_ratio = np.clip(X_raw[:, 1], 0.01, 100)
@@ -205,13 +191,9 @@ def run_calibrate():
             margin_chg[i] = (margin[i] - margin[i-5]) / abs(margin[i-5]) * 100
     margin_norm = margin_chg / max(np.std(margin_chg) * 3, 1)
 
-    # northbound: 标准化
-    nb = np.array([r6 or 0 for r6 in X_raw[:, 5]])
-    nb_norm = nb / max(np.std(nb) * 3, 1.0)
-
-    # 综合得分：等权组合 (含新因子)
-    score = (X_raw[:, 0] * 0.35 + log_ad * 0.20 + vol_norm * 0.15 +
-             flow_norm * 0.10 + margin_norm * 0.10 + nb_norm * 0.10)
+    # 综合得分：等权组合 (5因子，北向资金已停发移除)
+    score = (X_raw[:, 0] * 0.40 + log_ad * 0.20 + vol_norm * 0.15 +
+             flow_norm * 0.15 + margin_norm * 0.10)
 
     # 按综合得分分5组，每组映射到 -2 ~ +2
     order = np.argsort(score)
@@ -370,7 +352,6 @@ def backfill():
             print(f'  融资余额回填: {len(sh_margin)}条')
     except Exception as e:
         print(f'  融资余额回填跳过: {e}')
-    print(f'  提示: 北向资金需每日运行 pipeline 累积')
 
     conn.commit()
     cur.execute("SELECT COUNT(*) FROM sentiment_raw_factors")
