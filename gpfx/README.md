@@ -1,17 +1,18 @@
 # A股数据分析与尾盘决策系统
 
-> 项目路径：`D:\code\xlx\`
-> 最后更新：2026-06-03
+> 最后更新：2026-07-27
 > MySQL: 192.168.3.68 | 数据库：`data_analysis` | root/root123
-> Git: `github.com/18862931387/gpfx` (SSH)
-> 当前版本：**v5.6** — 复合情绪+双买入+精简卖出+仓位1万
+> Git: `github.com/18862931387/gpfx`
+> 当前版本：**v6.7** — K-means情绪聚类 + 510300专用 + 网格搜索优化阈值
 > 服务器部署：详见 [DEPLOY.md](DEPLOY.md)
 
 ---
 
 ## 一、项目概览
 
-自动化A股数据采集 + 基金净值跟踪 + 复合情绪量化 + 双策略尾盘决策系统。
+自动化A股数据采集 + 基金净值跟踪 + 情绪量化(K-means++) + 双策略尾盘决策系统。
+
+**标的**: `510300` 沪深300ETF（原 563300 中证2000ETF，2026-07-23 切换）
 
 ### 架构
 
@@ -20,32 +21,37 @@
     │
 daily_update.py ─┬─ 指数涨跌停/成交额
                  ├─ 基金净值
-                 ├─ 大盘资金流向
+                 ├─ 大盘资金流向 (push2his日线)
+                 ├─ ETF K线缓存
                  └─ 自动触发 backup_db.py
     │
 sentiment_pipeline.py ─┬─ 每日采集多因子原始数据
-                      ├─ akshare 融资融券余额+北向资金
+                      ├─ akshare 融资融券余额
                       └─ --calibrate: K-means聚类+回归标定
+    │
+sentiment_v6.py ── K-means++ 聚类标定(4纯市场因子，去循环论证)
+    │               → sentiment = -0.2917 + 0.3861 × composite
     │
 MySQL 数据库 (data_analysis)
     │
-├── market_daily_stats       大盘涨跌停+成交额 (57 rows)
-├── market_capital_flow      大盘资金流向 (60 rows, backfilled)
-├── market_sentiment         市场情绪 (120 rows, -2.5~2.5)
+├── market_daily_stats       大盘涨跌停+成交额
+├── market_capital_flow      大盘资金流向 (push2his日线)
+├── market_sentiment         市场情绪 (v5/v6双字段)
 ├── index_daily              四大指数日涨跌幅备份
-├── market_news              每日新闻标题+情绪打分 (NEW)
-├── sentiment_raw_factors    多因子原始数据 (120 rows)
-├── fund_history             基金净值 (216 rows)
-├── etf_kline                ETF日K线缓存 (NEW — 回测加速)
+├── market_news              每日新闻标题+情绪打分
+├── sentiment_raw_factors    多因子原始数据 (4聚类因子)
+├── fund_history             基金净值
+├── etf_kline                ETF日K线缓存
 ├── position                 持仓记录 (real+system)
-├── backtest_results         策略回测结果 (4 rows)
-├── strategy_signals         策略信号日志 (NEW)
+├── backtest_results         策略回测结果
+├── strategy_signals         策略信号日志
+├── near_miss_signals        近失信号记录
     │
-strategy_config.py  ── VERSIONS[-1] = v5.6 参数中心
+strategy_config.py  ── VERSIONS 版本管理，get_latest()=v6.7
     │
 _afternoon_check.py  ── 14:30后运行 → 尾盘买卖建议
     │
-backup_db.py  ── daily_update.py 自动调用 → db_export_*.sql → git push
+simulate.py  ── 策略回测引擎
 ```
 
 ### 配置中心化
@@ -53,7 +59,9 @@ backup_db.py  ── daily_update.py 自动调用 → db_export_*.sql → git pu
 ```
 config.py  ─┬─ DB = {host, port, user, password, database}
             ├─ CAPITAL = 20000
-            ├─ COMPOSITE_WT = {sh: 0.3, sz: 0.2, cy: 0.1, kc: 0.4}
+            ├─ PRIMARY_FUND = '510300'
+            ├─ COMPOSITE_WT = {sh: 0.3, sz: 0.2, cy: 0.1, zz2000: 0.4}
+            ├─ EASTMONEY_UT = 'b2884a393a59ad64002292a3e90d46a5'
             ├─ API URLs / headers / constants
             └─ 所有脚本 from config import ...
 ```
@@ -74,16 +82,13 @@ config.py  ─┬─ DB = {host, port, user, password, database}
 | accum_nav | DECIMAL(10,4) | 累计净值 |
 | daily_growth | DECIMAL(6,2) | 日增长率% |
 
-**etf_kline — ETF日K线缓存 (NEW)**
+**etf_kline — ETF日K线缓存**
 
 | 字段 | 类型 | 说明 |
 |:----|:----|:-----|
 | fund_code | VARCHAR(10) | 基金代码 |
 | trade_date | DATE | 交易日 |
-| open | DECIMAL(10,4) | 开盘价 |
-| high | DECIMAL(10,4) | 最高价 |
-| low | DECIMAL(10,4) | 最低价 |
-| close | DECIMAL(10,4) | 收盘价 |
+| open/high/low/close | DECIMAL(10,4) | OHLC |
 | volume | DECIMAL(20,2) | 成交量 |
 | is_adj | TINYINT(1) | 1=前复权 |
 
@@ -92,13 +97,10 @@ config.py  ─┬─ DB = {host, port, user, password, database}
 | 字段 | 类型 | 说明 |
 |:----|:----|:-----|
 | fund_code | VARCHAR(10) | 基金代码 |
-| fund_name | VARCHAR(100) | 基金名称 |
 | trade_date | DATE | 交易日 |
 | trade_type | VARCHAR(10) | buy/sell |
 | shares | INT | 股数 |
 | price | DECIMAL(10,4) | 成交价格 |
-| amount | DECIMAL(15,2) | 成交金额 |
-| shares_after | INT | 操作后持仓 |
 | cash_after | DECIMAL(15,2) | 操作后现金 |
 | note | TEXT | 备注（real / system 区分） |
 
@@ -107,62 +109,42 @@ config.py  ─┬─ DB = {host, port, user, password, database}
 | 字段 | 类型 | 说明 |
 |:----|:----|:-----|
 | trade_date | DATE | 交易日 |
-| sentiment_value | DECIMAL(5,2) | -2.5~2.5 |
+| sentiment_value | DECIMAL(5,2) | 旧版情绪值 (-2.5~2.5) |
+| sentiment_v6 | DECIMAL(5,2) | v6 K-means情绪值 (-2.5~2.5) |
 | sentiment_zone | VARCHAR(10) | 冷热区间 |
-| composite_idx | DECIMAL(6,4) | 原始4指数加权值 |
-| calibrated | TINYINT(1) | 0=calc_sentiment / 1=回归标定 |
-| market_desc | TEXT | 市场描述 |
+| composite_idx | DECIMAL(6,4) | 4指数加权值 |
 
 **sentiment_raw_factors — 多因子原始数据**
 
 | 字段 | 类型 | 说明 |
 |:----|:----|:-----|
 | trade_date | DATE | 交易日 |
-| sh_pct | DECIMAL(5,2) | 上证涨跌幅% |
-| sz_pct | DECIMAL(5,2) | 深证涨跌幅% |
-| cy_pct | DECIMAL(5,2) | 创业板涨跌幅% |
-| kc_pct | DECIMAL(5,2) | 中证2000涨跌幅% |
-| limit_up | INT | 涨停家数 |
-| limit_down | INT | 跌停家数 |
-| turnover | DECIMAL(15,2) | 成交额(亿) |
-| main_force_net | DECIMAL(20,2) | 主力净流入 |
+| composite_index | DECIMAL(10,4) | 4指数加权涨跌幅 |
+| sector_ad_ratio | DECIMAL(6,4) | 板块涨跌比 |
+| volume_pctile_60d | DECIMAL(5,2) | 60日成交量百分位 |
+| main_force_net | DECIMAL(15,2) | 主力净流入 |
 | margin_balance | DECIMAL(20,2) | 融资融券余额 |
-| northbound_net | DECIMAL(20,2) | 北向资金净流入 |
+| sentiment_label | DECIMAL(5,2) | 聚类标签 (-2~+2) |
 
-**strategy_signals — 策略信号日志 (NEW)**
+> 2024年8月起北向资金日频数据已停止披露，northbound_net 因子已移除
 
-| 字段 | 类型 | 说明 |
-|:----|:----|:-----|
-| trade_date | DATE | 交易日 |
-| signal_type | VARCHAR(10) | buyA/buyB/sell_all/stop_loss |
-| sentiment_value | DECIMAL(5,2) | 触发时情绪值 |
-| nav | DECIMAL(10,4) | 触发时净值 |
-| reason | VARCHAR(200) | 触发原因 |
-| executed | TINYINT(1) | 0=仅记录 / 1=已执行 |
-
-**index_daily — 指数日涨跌幅备份 (NEW)**
+**market_capital_flow — 大盘资金流向**
 
 | 字段 | 类型 | 说明 |
 |:----|:----|:-----|
 | trade_date | DATE | 交易日 |
-| sh_pct | DECIMAL(6,2) | 上证涨跌幅% |
-| sz_pct | DECIMAL(6,2) | 深证涨跌幅% |
-| cy_pct | DECIMAL(6,2) | 创业板涨跌幅% |
-| zz2000_pct | DECIMAL(6,2) | 中证2000涨跌幅% |
+| main_force_net | DECIMAL(15,2) | 主力净额(元) |
+| super_large_net | DECIMAL(15,2) | 超大单净额 |
+| large_net | DECIMAL(15,2) | 大单净额 |
+| retail_net | DECIMAL(15,2) | 散户净额 |
 
-> 由 daily_update.py 每日写入，_afternoon_check.py 实时API失败时作为兜底
-
-**market_news — 每日新闻情绪 (NEW)**
+**near_miss_signals — 近失信号记录**
 
 | 字段 | 类型 | 说明 |
 |:----|:----|:-----|
 | trade_date | DATE | 交易日 |
-| title | VARCHAR(500) | 新闻标题 |
-| sentiment_score | DECIMAL(5,2) | 单条情绪分 -2~+2 |
-| pos_words | TEXT | 命中的利好关键词 |
-| neg_words | TEXT | 命中的利空关键词 |
-
-> 新浪财经滚动新闻 → 关键词匹配打分 → 综合加权 → 融入 sentiment 修正
+| cond1~cond4 | TINYINT | 四项条件分别满足状态 |
+| miss_reason | VARCHAR(100) | 未触发原因 |
 
 ---
 
@@ -170,144 +152,182 @@ config.py  ─┬─ DB = {host, port, user, password, database}
 
 | 文件 | 说明 |
 |:----|:------|
-| `config.py` | **配置中心** — DB/API/常量，所有脚本 import |
-| `strategy_config.py` | **版本管理中心** — 所有策略变体参数，`VERSIONS[-1]`=v5.6 |
-| `create_signals_table.sql` | strategy_signals 建表 DDL |
-| `create_kline_table.sql` | etf_kline 建表 DDL |
-| `create_position.sql` | position 建表 DDL |
-| `create_results_table.sql` | backtest_results 建表 DDL |
-| `_afternoon_check.py` | **尾盘决策 v5.6** — 复合情绪+双买入+清仓/止损+多因子实时修正 |
-| `sentiment_pipeline.py` | **情绪流水线** — 每日采集多因子+akshare融资融券/北向+重标定 |
-| `news_sentiment.py` | **新闻情绪因子** — 新浪财经头条抓取+关键词打分+综合评分 |
-| `sentiment_calibrate.py` | 旧版情绪校准（单指数+涨跌停+成交额+资金流向） |
-| `daily_update.py` | **一键更新** — 指数行情+基金净值+ETF K线缓存+资金流向+自动备份 |
-| `backup_db.py` | **自动备份** — 7表导出SQL → git add/commit/push，保留7天 |
-| `simulate.py` | 策略回测引擎，从 `strategy_config.py` 读取参数 |
-| `verify_db.py` | 数据库数据验证查询 |
+| `config.py` | **配置中心** — DB/API/常量/TOKEN，所有脚本 import |
+| `strategy_config.py` | **版本管理中心** — v5.4~v6.7 共18个策略变体，`get_latest()`=v6.7 |
+| `_afternoon_check.py` | **尾盘决策** — 实时情绪+4条件买A+买B趋势+信号落地 |
+| `sentiment_v6.py` | **V6情绪标定** — K-means++ 聚类(4纯市场因子z-score标准化)+回归 |
+| `sentiment_pipeline.py` | **情绪流水线** — 每日采集多因子+自动标定+历史回填 |
+| `news_sentiment.py` | **新闻情绪因子** — 新浪财经头条抓取+关键词打分 |
+| `daily_update.py` | **一键更新** — 指数行情+净值+K线缓存+资金流向+自动备份 |
+| `simulate.py` | **策略回测引擎** — 多版本对比+月度统计+结果入库 |
+| `backup_db.py` | **自动备份** — 7表导出SQL → git add/commit/push |
+| `a_stock_indices.py` | 指数行情查询工具 |
 | `logger.py` | 日志工具 — 控制台 + `logs/YYYYMMDD.log` |
-| `query_mysql.py` | MySQL 交互查询入口 |
+| `zjlx_history.csv` | 历史资金流向数据 (CSV格式) |
 
 ---
 
-## 四、交易策略 v5.6 (2026-06-01)
+## 四、交易策略 v6.7 (2026-07-24)
+
+**标的**: `510300` 沪深300ETF | **仓位上限**: 20000
 
 ### 买入条件
 
-#### 买A — 恐慌抄底（全仓，max_invest=10000）
+#### 买A — 恐慌抄底
 
-| # | 条件 | 说明 |
+| # | 条件 | 阈值 |
 |:-:|:----|:-----|
-| ① | 复合情绪 **≤ -1.2** | 极度恐慌 |
-| ② | ETF 日跌幅 **≥ -1%** | 价格确认 |
+| ① | 情绪值 **≤ -0.4** | 恐慌区间 |
+| ② | ETF 日跌幅 **≥ -0.3%** | 价格确认 |
 | ③ | 成交额 ≥ 25000亿 **或** 跌停 > 涨停 | 量价确认 |
+| ④ | 尾盘5分钟主力资金 **净流入** | 抄底确认 |
 
-#### 买B — 趋势跟随（全仓，max_invest=10000）
+极端恐慌(情绪≤-2.0)时条件④放宽至主力>-500亿。
 
-| # | 条件 | 说明 |
+融资去杠杆(5日融资余额变化<-1%)时，条件①阈值从-0.4放宽至-1.0。
+
+#### 买B — 趋势跟随
+
+| # | 条件 | 阈值 |
 |:-:|:----|:-----|
-| ① | 复合情绪 **-0.5 ~ +0.5** | 市场中性 |
+| ① | 情绪值 **-0.2 ~ +0.2** | 市场中性 |
 | ② | ETF 收盘价 **> 20日均线** | 趋势确立 |
 
 ### 卖出条件
 
-| 规则 | 条件 |
+| 规则 | 条件 | 操作 |
+|:----|:------|:-----|
+| **情绪偏高** | 情绪 ≥ **0.3** | 卖一半 |
+| **情绪过热** | 情绪 ≥ **0.6** | 清仓 |
+| **止损** | 浮亏 ≥ **-3%** | 清仓 |
+| **回撤止损** | 从峰值回落 ≥ **-5%** | 清仓 |
+| **盈利锁定** | 盈利≥5%后，回撤止损收紧至 **-2.5%** | 清仓 |
+
+### 避险仓位 (中国神华 601088)
+
+| 条件 | 仓位缩放 |
 |:----|:------|
-| **情绪过热** | 复合情绪 ≥ **2.0** → 清仓 |
-| **止损** | 日跌 ≥ **-3%** → 清仓 |
-
-### 实时情绪修正（calc_sentiment）
-
-| 因子 | 条件 | 修正值 |
-|:----|:----|:------|
-| margin_chg（融资变化率） | +0.72% → | +0.1 |
-| 北向净流入 | > +80亿 → | +0.4 |
-| 北向净流入 | < -60亿 → | -0.4 |
-| **新闻情绪 (NEW)** | +0.5~+2.0 → | **+0.15~+0.6** |
-| **新闻情绪 (NEW)** | -2.0~-0.5 → | **-0.6~-0.15** |
-| 涨停/跌停比 > 3 || +0.3 |
-| 涨停/跌停比 < 0.3 || -0.3 |
-| 成交额 > 25000亿 || ±0.2 |
-| 成交额 < 18000亿 || ×0.7 |
-| 主力净流入 > 200亿 || +0.2 |
-| 主力净流入 < -200亿 || -0.2 |
-| 总计上限 || ±2.5 |
+| 神华 > MA5 | 避险减仓至 50% |
+| 神华 ≤ MA5 | 风险加仓至 150% |
 
 ### 参数配置
 
 ```python
-VERSIONS[-1] = {  # v5.6
-    "ver": "v5.6",
+{
+    "ver": "v6.7",
+    "active": "2026-07-24~",
+    "desc": "510300专用: 新情绪尺度网格搜索优化(买A≤-0.4/跌≥-0.3%), 卖半0.3/清仓0.6",
     "params": {
-        "buyA_sv_max": -1.2,
-        "buyA_dc_min": -1.0,
-        "buyB": {"sv_min": -0.5, "sv_max": 0.5, "position": 1.0},
-        "sell_all_sv": 2.0,
+        "buyA_sv_max": -0.4,
+        "buyA_dc_min": -0.3,
+        "buyA_margin_boost": True,
+        "buyB": {"sv_min": -0.2, "sv_max": 0.2, "position": 1.0},
+        "sell_half_sv": 0.3,
+        "sell_all_sv": 0.6,
         "stop_loss_pct": -3.0,
-        "sell_half": None,
-        "take_profit": None,
-        "trailing_stop": None,
-        "max_invest": 10000,
+        "trailing_stop_pct": -5.0,
+        "profit_lock": 5.0,
+        "lock_trailing_stop": -2.5,
+        "max_invest": 20000,
         "composite_wt": [0.3, 0.2, 0.1, 0.4],
+        "sentiment_formula": "sentiment = -0.2917 + 0.3861 × composite",
+        "sentiment_source": "sentiment_v6",
+        "haven_code": "601088",
+        "haven_name": "中国神华",
+        "haven_ma_window": 5,
+        "haven_scale": 0.5,
+        "risk_scale": 1.5,
     },
 }
 ```
 
 ---
 
-## 五、情绪量化模型
+## 五、情绪量化模型 (V6)
 
-### 复合指数
+### 核心改进 (vs v5)
 
-4指数加权：**上证0.3 + 深证0.2 + 创业板0.1 + 中证2000 0.4**
+| 维度 | v5 (旧) | v6 (新) |
+|:----|:-----|:-----|
+| 分组方式 | 等频分箱(强制20%每档) | K-means++ 聚类(数据自驱动) |
+| 聚类因子 | 含复合指数(循环论证) | 4纯市场指标(去循环论证) |
+| 因子数 | 6因子(含北向) | 4因子(北向数据停发) |
+| 轮廓系数 | 0.36 | 0.45 (+25%) |
+| 情绪尺度 | 压缩[-0.5, +0.5] | 拉伸[-2.2, +1.3] |
 
-中证2000权重最高，对齐持仓标的 563300（中证2000ETF）。
+### 4聚类因子 (z-score标准化)
 
-### 回归校准
+| 因子 | 说明 | 来源 |
+|:----|:-----|:-----|
+| log_ad | 板块涨跌比对数值 | 东财行业板块 |
+| vol_pct | 60日成交量百分位 | market_daily_stats |
+| flow | 主力净流入 | push2/push2his |
+| margin_chg | 融资余额5日变化率 | akshare SSE |
 
-两条校准线并存，旧校准为默认：
+### 回归映射
 
-| 校准 | 数据量 | 公式 | R² | 回测收益 |
-|:----|:-----:|:----|:--:|:-------:|
-| **旧标定**（默认） | 48条 | sentiment = 0.3461 + 0.8168×composite | 0.92 | **+10.06%** |
-| 新标定（备用） | 120条 | sentiment = -0.1309 + 1.0622×composite | 0.85 | +8.05% |
+聚类后按各簇平均复合指数排序，映射到 -2~+2 情绪标签，再回归到复合指数：
 
-旧校准的"乐观基值"（0.3461截距）在回测中过滤噪声，收益更优。
+```
+sentiment = -0.2917 + 0.3861 × composite
+R² = 0.1786 (v5循环论证R²=0.92为虚高)
+```
 
-### 多因子修正
+### 多因子实时修正 (_afternoon_check.py)
 
-实时修正因子在 `_afternoon_check.py` 的 `calc_sentiment()` 中执行（见上表），margin_chg 和 northbound_net 为 v5.6 新增。
+| 因子 | 条件 | 修正值 |
+|:----|:----|:------|
+| 涨停/跌停比 > 3 | 情绪<0时 | +0.3 |
+| 涨停/跌停比 < 0.5 | 情绪>0时 | -0.3 |
+| 成交额 > 25000亿 | — | ±0.2 |
+| 成交额 < 18000亿 | — | ×0.7 |
+| 主力净流入 | 与情绪同向 | 比例加成 |
+| 融资5日变化 > +1% | — | +0.2 |
+| 融资5日变化 < -1% | — | -0.3 |
+| 新闻情绪 | score×0.3 | ±0.6 |
+| 总计上限 | — | ±2.5 |
 
 ---
 
-## 六、回测结果对比
+## 六、策略版本演进
 
-| 版本 | BuyA阈值 | 仓位 | 收益 | 最大回撤 | 交易次数 | 备注 |
-|:---:|:--------:|:---:|:----:|:-------:|:-------:|:----|
-| v5.4 | ≤-0.8 | 10000 | +4.64% | 2.38% | 10 | 单指数+卖一半+止盈 |
-| v5.5a | ≤-0.8 | 10000 | +3.15% | 2.38% | 7 | 复合指数+买B半仓 |
-| v5.5b | ≤-0.8 | 10000 | +4.89% | 2.38% | 7 | 去止盈 |
-| v5.5c | ≤-0.5 | 8000 | +8.41% | 2.38% | 5 | 去卖一半+买B全仓 |
-| v5.5d | ≤**-1.2** | 8000 | +8.05% | 1.49% | 3 | 最佳风控 |
-| v5.5e | ≤-1.2 | 8000 | — | — | — | 加回撤止损→被ETF日波动误触 |
-| **v5.6** | ≤-1.2 | **10000** | **+10.06%** | **2.49%** | **3** | **仅升仓位，其余不变** |
+### v6.x 系列 (K-means情绪 + 510300)
 
-### 核心发现 (网格搜索)
+| 版本 | 关键参数 | 收益 | 回撤 | 交易 | 备注 |
+|:---:|:--------|:----:|:----:|:---:|:----|
+| v6.0 | v5.6参数+K-means | — | — | — | 新情绪基线 |
+| v6.1 | 仓位15000 | — | — | — | 网格搜索最优 |
+| v6.4 | 回撤-7%+盈利锁8% | +21.66% | 5.97% | — | R/R=3.6 |
+| v6.5 | +神华避险 | +27.35% | 4.70% | — | R/R=5.8 |
+| v6.6 | 510300切换+阈值放宽 | — | — | — | 买A≤-0.8 |
+| v6.6a | v6.6 + 神华避险 | -0.47% | — | 7 | 跑赢buy&hold+1.19% |
+| **v6.7** | **新情绪尺度网格搜索** | **+11.80%** | **4.66%** | — | **买A≤-0.4/卖半0.3/清仓0.6** |
 
-- **仓位越大收益越高**（线性缩放 8000→10000→12000→20000，收益同比放大）
-- **buyA阈值不可松**：放宽到≤-0.8 → 收益从+10.06%缩到+8.41%
-- **去MA过滤**：收益腰斩（+5.95%），增加4笔噪声交易
-- **buyB范围不变**：扩展到-1.0~0.5 → 0额外交易（价格在MA之下）
-- **回撤止损被否**：ETF日内波动大，3次测试均导致假退出
+### v5.x 系列 (旧情绪 + 563300 中证2000ETF)
 
-### v5.6 交易明细（55天回测）
+| 版本 | BuyA阈值 | 仓位 | 收益 | 最大回撤 | 交易 |
+|:---:|:--------:|:---:|:----:|:-------:|:---:|
+| v5.5d | ≤-1.2 | 8000 | +8.05% | 1.49% | 3 |
+| v5.6 | ≤-1.2 | 10000 | +10.06% | 2.49% | 3 |
+| v5.8 | ≤-1.2 | 10000 | — | — | — | +margin_boost |
 
-| 日期 | 操作 | 价格 | 情绪 | 盈亏 |
-|:---:|:----|:----:|:----:|:----:|
-| 03-23 | **买A** 恐慌抄底 | 1.356 | sv=-3.0 | — |
-| 04-08 | **清仓** 情绪过热 | 1.474 | sv=+3.8 | +1.42%（10000→12410） |
-| 04-09 | **买B** 趋势跟随 | 1.462 | sv=-0.1 | — |
+### v6.7 800天长期回测 (2023-04-06 ~ 2026-07-24)
 
-03-23买入→04-08卖出（+8.7%大恐慌弹性反弹），04-09趋势跟随至今。
+| 指标 | v6.7 | buy&hold |
+|:----|:----:|:-------:|
+| 总收益 | +6.63% | +24.74% |
+| 最大回撤 | 4.66% | 25.04% |
+| 风险收益比 | 1.42 | 0.99 |
+
+> 长期回测中 v6.7 在熊市保护出色，但牛市因卖阈值偏低(0.3/0.6)过早离场，错过了部分涨幅。
+
+### 近半年表现 (2026-01-24 ~ 2026-07-24)
+
+| 指标 | v6.7 | buy&hold | 超额 |
+|:----|:----:|:-------:|:---:|
+| 收益 | +2.90% | +0.81% | **+2.09%** |
+| 回撤 | 0.84% | 8.56% | — |
+| 交易 | 25次 | — | — |
 
 ---
 
@@ -319,10 +339,15 @@ VERSIONS[-1] = {  # v5.6
 | ETF日K线 | `web.ifzq.gtimg.cn/appstock/app/fqkline/get` | 前复权 |
 | ETF净值 | `api.fund.eastmoney.com/f10/lsjz` | 东方财富基金历史净值 |
 | 涨跌停/成交额 | `push2.eastmoney.com` | 需 IPv4 + Referer |
-| 主力资金流向 | `push2.eastmoney.com/api/qt/ulist.np/get` | 需 Referer |
-| 北向资金 | `data.hexin.cn/market/hsgtApi/method/dayChart/` | 同花顺 |
-| **融资融券余额** | `akshare.stock_margin_detail_sse()` | 上交所数据 |
-| **北向净流入** | `akshare.stock_hsgt_fund_flow_summary_em()` | akshare东方财富 |
+| 主力资金流向(日线) | `push2his.eastmoney.com` | 沪深两市合并，稳定不受限流 |
+| 主力资金流向(个股) | `push2.eastmoney.com/api/qt/ulist.np/get` | 尾盘实时 |
+| 北向资金 | `data.hexin.cn` | 同花顺，需去偏移 |
+| 融资融券余额 | `akshare.stock_margin_sse()` | 上交所数据 |
+| 行业板块资金 | `akshare.stock_sector_fund_flow_rank()` | 行业+概念 |
+| 涨停跌停池 | `akshare.stock_zt_pool_em()` | 实时涨停池 |
+
+> **注意**: push2 实时接口存在IP限流，主力资金数据优先使用 push2his 日线接口；
+> 当 push2his 不可用时，使用 `data.eastmoney.com/zjlx/dpzjlx.html` 页面解析作为兜底。
 
 ---
 
@@ -331,49 +356,52 @@ VERSIONS[-1] = {  # v5.6
 ### 每日运行
 
 ```bash
-# 1. 启动 MySQL（服务未注册时）
-Start-Process -FilePath "C:\Program Files\MySQL\MySQL Server 5.6\bin\mysqld.exe" `
-  -ArgumentList "--datadir=C:\PROGRA~3\MySQL\MYSQLS~1.6\data --port=3306" -WindowStyle Hidden
-
-# 2. 数据更新（收盘后）
+# 1. 数据更新（收盘后）
 python daily_update.py
-#    → 自动调用 backup_db.py → git push
+#    → 自动调用 backup_db.py
 
-# 3. 下午14:30后运行尾盘分析（有仓时）
+# 2. 下午14:30后运行尾盘分析
 python _afternoon_check.py
 
-# 4. 情绪数据采集（每日）
+# 3. 情绪数据采集（每日）
 python sentiment_pipeline.py
-#    → --calibrate 参数触发重标定（建议60+交易日）
 
-# 5. 回测验证参数（调参后）
-python simulate.py
+# 4. 回测验证参数
+python simulate.py                   # 使用最新版本
+python simulate.py --ver=v6.6a       # 指定版本对比
+```
+
+### 情绪标定
+
+```bash
+# 标定 + 打印结果
+python sentiment_v6.py
+
+# 标定 + 写入DB
+python sentiment_v6.py --store
+
+# 仅回填历史数据
+python sentiment_v6.py --backfill
 ```
 
 ### 调参流程
 
 ```bash
 1. 编辑 strategy_config.py，在 VERSIONS 末尾追加新版本
-2. python simulate.py 对比新旧版本回测结果
-3. 满意后，确保 get_latest() 返回新版本
-4. python _afternoon_check.py 确认脚本生效
-```
-
-### 备份
-
-```bash
-# 每日自动（通过 daily_update.py）或手动：
-python backup_db.py
-# 导出 7 表 → db_export_YYYY-MM-DD.sql → git add/commit/push → 保留7天
+2. 更新 get_latest() 返回新版本索引
+3. python simulate.py 对比新旧版本回测结果
+4. 满意后 git commit & push
 ```
 
 ---
 
 ## 九、注意事项
 
-1. **IPv4 强制**：东方财富 push2 系列 API 必须 IPv4 访问（`import requests.packages.urllib3.util.connection as ucn; ucn.allowed_gai_family = lambda: socket.AF_INET`）
+1. **IPv4 强制**：东方财富 push2 系列 API 必须 IPv4 访问
 2. **push2 Referer**：资金流向类接口需 `Referer: https://quote.eastmoney.com/`
-3. **MySQL 非服务**：MySQL 5.6 未注册为 Windows 服务，每次需手动启动 mysqld
-4. **Git 推送**：需加载 `$env:Path += ";D:\Program Files\Git\bin"`
-5. **情绪重标定**：`python sentiment_pipeline.py --calibrate` 触发 6 因子 K-means + OLS
-6. **网格搜索结论**：当前参数组合已接近最优（55天窗口），新增信号源需等待 akshare 更新 options PCR / futures premium
+3. **push2 限流**：实时接口受IP限制，主力资金使用 push2his 日线接口兜底
+4. **EASTMONEY_UT Token**：定期更新 config.py 中的 token 值
+5. **北向资金**：2024年8月起日频数据停止披露，相关因子已移除
+6. **情绪重标定**：建议每累积30+交易日数据后运行 `python sentiment_v6.py --store`
+7. **策略版本**：`get_latest()` 手动维护，新增版本后需同步更新索引
+8. **数据库备份**：`db_export_*.sql` 文件较大(3-4MB)，推送时注意超时
